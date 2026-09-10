@@ -1,24 +1,30 @@
 # Core
 pandas
-numpy
+# Pinned below 2.x: torch==2.2.2 (see the LSTM note below) predates full
+# numpy 2.x support and raises "RuntimeError: Numpy is not available" from
+# torch.from_numpy() otherwise — caught by testing a genuinely fresh
+# install, not assumed. See DECISIONS_AND_ISSUES_LOG.md #29.
+numpy<2
 matplotlib
 requests
 
-# Stationarity testing (ADF) and later ARIMA/SARIMA
+# Stationarity testing (ADF), ARIMA/SARIMA (src/models/arima_sarima.py, sarima_check.py)
 statsmodels
 
-# Feature scaling and later XGBoost feature-importance evaluation
+# Feature scaling (src/feature_engineering.py) and XGBoost feature-importance evaluation
 scikit-learn
 joblib
 
-# Notebook environment
-jupyter
-ipykernel
-
+# XGBoost model (src/models/xgboost_model.py)
 xgboost
 
-# LSTM. NOT tensorflow: TF's pip wheel requires AVX instructions, which
-# Rosetta 2 does not emulate on Apple Silicon under an x86_64 Python (see
-# DECISIONS_AND_ISSUES_LOG.md #17). Install the CPU build explicitly:
+# LSTM model (src/models/lstm_model.py). NOT tensorflow: TF's pip wheel
+# requires AVX instructions, which Rosetta 2 does not emulate on Apple
+# Silicon under an x86_64 Python (see DECISIONS_AND_ISSUES_LOG.md #17).
+# On that setup, install explicitly:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch
+
+# Notebook environment (data quality / ADF / ACF-PACF notebooks)
+jupyter
+ipykernel

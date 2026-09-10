@@ -1364,6 +1364,103 @@ cross-model.
 
 ---
 
+## 28. Closing a gap: the data is a reference rate, not a tradeable market close — never made it into a Limitations statement until now
+
+**What happened:** Stage 1's own handoff notes flagged this explicitly
+as "something needing a human decision before feature engineering" - the
+distinction between the ECB's daily reference rate (a single official
+fixing, published once per TARGET2 business day at ~16:00 CET, computed
+via a concertation procedure among EU central banks) and a genuine
+tradeable market close (which a retail or institutional participant
+could actually transact at, subject to bid/ask spread and slippage).
+Reviewing the full README and decisions log during this final pass found
+that while the *publication mechanism* was documented (Stage 1, entry #2
+and the README's Data Source section), the *interpretive consequence* -
+that this project's results describe a fixing series, not a tradeable
+one - was never actually written down as a limitation.
+
+**Why it happened:** The distinction got partially captured (the "56
+flat days" observation in entry #4 and the reference-rate publication
+detail in entry #2) but the explicit "here's what this means for
+interpreting the results" framing fell through the cracks between
+Stage 1 (data pull) and Stage 3-6 (modeling), where the focus shifted to
+model comparisons rather than data provenance.
+
+**What we did:** Added an explicit Limitations bullet to the README
+covering this directly: results describe the ECB reference rate series,
+not a tradeable market feed; even if a model had found a real edge, its
+practical tradability would additionally depend on real-world spread/
+slippage/execution-timing costs that a fixing-rate backtest doesn't
+capture. Given this project's headline finding is a null result (no
+model beats naive), this limitation doesn't change any conclusion, but
+it's still the honest, complete statement of what the data actually is
+and isn't - and it would matter a great deal if a future extension of
+this project ever *did* find an apparent edge, since a fixing-rate-based
+"edge" is a materially weaker claim than a tradeable-price-based one.
+
+**Why not the alternative:** Could have left this unstated since it
+doesn't change the project's actual conclusions - rejected, since a
+reader evaluating this project's rigor (an interviewer, for instance)
+should be able to find this caveat stated plainly rather than have to
+infer it themselves from the data source description.
+
+**Concept tie-in:** The gap between "this data source is legitimate and
+well-documented" (true here) and "here's exactly what claims this data
+can and cannot support" (a separate, necessary step) - worth keeping
+distinct in any project, especially one whose whole premise is honest
+reporting of what was and wasn't found.
+
+---
+
+## 29. Fresh-install reproducibility test caught a real break: unpinned numpy + torch 2.2.2
+
+**What happened:** As part of the final documentation pass, tested
+reproducibility properly rather than assuming it: cloned the pushed repo
+into a clean directory, built a brand-new venv, and ran
+`pip install -r requirements.txt` exactly as a first-time reader would.
+`import torch` printed a NumPy compatibility warning
+("Failed to initialize NumPy: _ARRAY_API not found") but didn't crash;
+however, `torch.from_numpy(...)` - used throughout `lstm_model.py` to
+move data between pandas/numpy and PyTorch tensors - raised
+`RuntimeError: Numpy is not available`.
+
+**Why it happened:** `requirements.txt` listed `numpy` unpinned, so a
+fresh install resolved to the current latest release (2.0.2), while
+`torch` was also unpinned but happened to resolve to 2.2.2 - a version
+that predates PyTorch's full numpy 2.x support. The working development
+venv used throughout Stages 1-6 had numpy at 1.26.4 (pulled down at some
+earlier point by another package's dependency resolution, noticed only
+now in passing), which is numpy-2.x-incompatible-torch's actual
+requirement - so every prior stage's LSTM runs happened to work by
+accident of dependency resolution history, not because the pinned
+requirements guaranteed it. This is exactly the kind of drift the
+"regenerate requirements.txt from the actual environment" instruction
+for this stage was meant to catch, and it would not have been caught
+without actually testing a from-scratch install.
+
+**What we did:** Pinned `numpy<2` in `requirements.txt` with a comment
+explaining why, then re-ran the identical fresh-clone/fresh-venv test:
+`torch.from_numpy()` and `.numpy()` round-tripped correctly with no
+warnings. This is now a verified, not assumed, working combination.
+
+**Why not the alternative:** Could have instead upgraded to a newer
+`torch` release with full numpy 2.x support - considered, but rejected
+for this pass: the numpy<2 pin reproduces the exact combination already
+validated by every model run in this project (all EUR/USD, GBP/USD, and
+USD/JPY LSTM results reported here were produced under numpy 1.26.4),
+so it's the lower-risk fix that doesn't require re-validating any
+reported number against a different numerical stack.
+
+**Concept tie-in:** "It ran on my machine throughout development" is not
+the same claim as "it reproduces from a fresh install" - unpinned
+transitive dependencies can drift silently over the life of a project
+(here, across roughly 24 hours of build time) without any single step
+failing, only surfacing when someone else (or a future clean
+environment) resolves them differently. Worth actually testing the
+reproduction path, not inferring it from "it worked every time I ran it."
+
+---
+
 ## Template for future entries (keep using this format going forward)
 
 ## N. [Short description of what happened]
