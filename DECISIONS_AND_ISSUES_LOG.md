@@ -603,6 +603,215 @@ only) before ever computing a test score.
 
 ---
 
+## 13. XGBoost evaluated with a single fit, not walk-forward — a justified difference from ARIMA, not an inconsistency
+
+**What happened:** ARIMA (#10) was evaluated with one-step-ahead
+walk-forward forecasting, refitting periodically as new true values
+arrived. XGBoost (`src/models/xgboost_model.py`) is instead fit once on
+train and evaluated with a plain one-shot `.predict()` on val and test.
+
+**Why it happened:** The two models have fundamentally different
+relationships to "new information." ARIMA's fitted parameters (a mean,
+or AR/MA coefficients) are a compressed summary of everything the model
+has seen — that summary can go stale as the process drifts, which is
+exactly why walk-forward re-exposes it to fresh true values one step at
+a time. XGBoost's *features*, by contrast, are already genuine
+backward-looking historical values (real past returns, real past
+rolling stats) computed once for every row of the feature table back at
+Stage 2 — a validation or test row's features already encode "true data
+known up to that point," independent of when the model itself was fit.
+There is no equivalent "staleness" for a single fixed fit to correct for.
+
+**What we did:** Documented this reasoning directly in
+`xgboost_model.py`'s module docstring so a reader doesn't assume the two
+models were scored on different, incomparable standards. Did not build
+the optional periodic-retrain sanity-check variant (e.g. retrain every
+N months and compare) — skipped deliberately, since the single-fit
+result already matches naive/ARIMA almost exactly on both val and test
+(see #16), leaving no drift-related question a periodic-retrain variant
+would meaningfully help answer; it would cost real compute to check
+something the evidence already speaks to.
+
+**Why not the alternative:** Could have forced XGBoost through the same
+walk-forward-with-refit loop "for consistency" — rejected, since that
+consistency would be superficial (same procedure, not same
+justification) and walk-forward exists specifically to solve a staleness
+problem that doesn't apply to a feature-table-based model in the same way.
+
+**Concept tie-in:** Evaluation methodology should match *why* a model
+might need re-exposure to new data, not be copy-pasted across model
+families for the appearance of uniformity.
+
+---
+
+## 14. Feature-importance bug caught: `get_score()` includes trees never used for prediction
+
+**What happened:** First pass at extracting XGBoost feature importance
+called `booster.get_score(importance_type="gain")` directly on the fitted
+model and got a suspiciously broad importance table — 11 of 14 features
+showed nonzero gain, including several day-of-week columns, even though
+the model's validation performance was statistically identical to naive
+(no evidence it had learned anything meaningful).
+
+**Why it happened:** With `early_stopping_rounds=50`, XGBoost keeps
+boosting for 50 rounds *past* the best-scoring round before stopping —
+in this run, `best_iteration=0` but training continued to round 51
+before patience was exhausted, meaning **50 extra trees were built and
+included in the booster object that are never actually used at
+prediction time** (`model.predict()` correctly restricts itself to
+`iteration_range=(0, best_iteration+1)`, verified directly). `get_score()`,
+however, aggregates gain across **every tree ever built in the booster**,
+with no automatic restriction to the deployed range — so it was reporting
+importance from 50 discarded trees the model doesn't actually use.
+
+**What we did:** Verified the discrepancy directly: confirmed
+`model.predict()` output matches `booster.predict(..., iteration_range=(0,1))`
+exactly (i.e., only tree 0 is deployed), then re-derived feature
+importance correctly via `booster.trees_to_dataframe()`, filtered to
+`Tree <= best_iteration`, and summed gain only over that deployed range.
+The corrected result is much narrower and more honest: only 3 of 14
+features (`roll_std_20`, `lag_1`, `lag_5`) have any nonzero gain at all,
+and the total gain across all three is tiny (~0.0005) — consistent with
+a single shallow, barely-useful tree, not a model that found real
+structure. Day-of-week features: **exactly zero gain** — they were never
+split on in the deployed tree.
+
+**Why not the alternative:** Could have reported the original, broader
+`get_score()` table since it "ran without error" — would have been
+actively misleading: attributing predictive importance to features
+(several `dow_*` columns) that provably never influence a single
+prediction the deployed model makes. This is exactly the kind of
+plausible-looking-but-wrong result this project's own instructions warn
+about scrutinizing before accepting.
+
+**Concept tie-in:** Early stopping's "patience" window silently keeps
+building (and, by default, reporting importance from) trees the deployed
+model doesn't use — a genuinely non-obvious XGBoost API gotcha worth
+knowing before trusting `get_score()` output on any early-stopped model.
+
+---
+
+## 15. Train-vs-validation RMSE comparison is confounded by different volatility regimes, not overfitting
+
+**What happened:** The XGBoost model's train-set RMSE (0.006126) came out
+*higher* than its validation-set RMSE (0.004976) — at a glance this looks
+backwards (models are supposed to fit training data at least as well as
+held-out data), which could be misread as a bug.
+
+**Why it happened:** Checked the unconditional standard deviation of log
+returns in each split independently: train (1999-2019) std = 0.006127,
+val (2020-2023) std = 0.004978, test (2024-2026) std = 0.004214. The
+train period's own return volatility (which includes the dot-com
+unwind and the 2008 financial crisis) is genuinely higher than either
+the validation or test period's volatility — confirming this is the
+same volatility-clustering phenomenon already noted from the raw return
+plot (#5, #6), not a modeling artifact. A model that has converged to
+predicting essentially zero everywhere (see #16) will naturally show a
+higher RMSE on a noisier period and a lower RMSE on a calmer one, with
+zero relationship to overfitting.
+
+**What we did:** Replaced the naive train-vs-val RMSE subtraction with
+the correct comparison: each period's model RMSE against **that same
+period's own naive-baseline RMSE**. Train: 0.006126 vs. naive 0.006126
+(ratio 1.0000). Val: 0.004976 vs. naive 0.004976 (ratio 1.0000). The
+model matches naive on both periods individually — meaning early
+stopping converged to an essentially trivial prediction everywhere, not
+a model that overfit train's noise and then failed to generalize (which
+would show a *good* train ratio and a *bad* val ratio, not two ratios
+that are both ~1.0).
+
+**Why not the alternative:** Could have reported the raw negative
+train-val gap as "no overfitting, val is even better than train!" without
+investigating why — would have missed the more informative and correct
+explanation (different volatility regimes) and could have looked like a
+red flag to a careful reader without the explanation attached.
+
+**Concept tie-in:** The standard "compare train performance to val
+performance" overfitting heuristic implicitly assumes both periods share
+similar underlying variance — when they don't (as here, given documented
+volatility clustering), the comparison needs to be re-anchored to each
+period's own trivial-baseline performance instead of compared directly
+against each other.
+
+---
+
+## 16. Honest finding: XGBoost, like ARIMA, does not beat the naive baseline
+
+**What happened:** Ran a 32-combination grid search over regularization
+hyperparameters (max_depth ∈ {2,3}, min_child_weight ∈ {10,20}, subsample
+∈ {0.7,0.8}, colsample_bytree ∈ {0.7,0.8}, learning_rate ∈ {0.01,0.05}),
+each trained with up to 1,000 boosting rounds and early stopping
+(patience=50) on validation RMSE. **Every single one of the 32
+configurations independently converged to `best_iteration=0`** — i.e.,
+the very first tree already minimized validation RMSE, and every
+additional tree in every configuration made validation performance
+worse, with validation RMSE across all 32 configs varying only in the
+5th decimal place (0.004976-0.004977).
+
+Extended the Stage 3 comparison table:
+
+| Model | Period | RMSE (return) | MAE (return) | Directional accuracy |
+|---|---|---|---|---|
+| Naive | val | 0.004976 | 0.003664 | undefined |
+| ARIMA(0,0,0) | val | 0.004976 | 0.003664 | 49.2% |
+| XGBoost | val | 0.004976 | 0.003664 | 51.2% |
+| Naive | test | 0.004212 | 0.002980 | undefined |
+| ARIMA(0,0,0) | test | 0.004212 | 0.002981 | 51.0% |
+| XGBoost | test | 0.004212 | 0.002980 | 51.6% |
+
+RMSE/MAE match all three models to 3-4 significant figures on both
+periods. XGBoost's directional accuracy (51.2% val, 51.6% test) is
+marginally higher than ARIMA's but still well within coin-flip range —
+no model here shows a directional edge that would survive normal
+statistical scrutiny (no significance test was run to formally confirm
+this, but a ~1-2 percentage point difference on ~700-1000 observations
+is not a claim this project is making).
+
+**Why it happened:** Consistent with the ACF/PACF finding (#10) that
+train-period returns carry essentially no linear autocorrelation
+structure, and now extended to nonlinear structure too: even a flexible,
+regularization-constrained gradient-boosted-tree model, searched across
+32 hyperparameter configurations, found nothing worth building past a
+single weak tree. The one deployed tree's feature importance (corrected
+per #14) attributes its entire (tiny) contribution to `roll_std_20`
+(realized volatility), `lag_1`, and `lag_5` — everything else, including
+all five day-of-week columns, has exactly zero importance.
+
+**What we did:** Reported this plainly as a second, independent
+confirmation of the random-walk finding from Stage 3, not as a modeling
+failure. Specifically addressed the two features flagged as "candidate,
+not pre-judged" in Stage 2: **day-of-week features show zero importance**
+in the deployed model — the known FX day-of-week liquidity pattern does
+not translate into next-day return predictability, at least not one this
+model could exploit. **Rolling-volatility (`roll_std_20`) is the single
+most-used feature**, though its contribution is still tiny in absolute
+terms — a hint (not strong evidence, given the model doesn't actually
+beat naive) that realized volatility might carry more information than
+lagged returns do, consistent with volatility clustering being a real,
+established FX phenomenon even when *direction* remains unpredictable.
+No further hyperparameter tuning was attempted once regularization and
+early stopping were in place and consistently converged to the same
+null result — per this project's own instructions, a modest, well-
+justified result is the goal here, not a maximally-tuned one.
+
+**Why not the alternative:** Could have widened the search (deeper
+trees, weaker regularization, more features) specifically until
+something beat naive on validation — explicitly avoided, both because
+it risks eventually overfitting *to validation* (a slower-motion version
+of the test-set p-hacking already avoided in #12) and because 32
+configurations landing on the identical null result is itself strong,
+convergent evidence rather than an under-searched space.
+
+**Concept tie-in:** A tree ensemble's early stopping mechanism, used
+correctly, is itself an overfitting guard — 32/32 configurations
+independently refusing to boost past round 0 is a stronger and more
+convincing "no signal here" signal than a single model's result would
+be; gain-based feature importance as a lens for distinguishing which
+candidate features carry even marginal information, separate from
+whether the model's overall predictions are useful.
+
+---
+
 ## Template for future entries (keep using this format going forward)
 
 ## N. [Short description of what happened]
