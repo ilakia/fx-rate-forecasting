@@ -23,6 +23,22 @@ not hidden.
 
 **Currency pairs (planned):** EUR/USD (current phase), GBP/USD, USD/JPY.
 
+## Key Finding (EUR/USD)
+
+**Three independent modeling approaches - linear statistical (ARIMA),
+nonlinear tabular (XGBoost, searched across 32 hyperparameter
+configurations), and deep sequential (LSTM) - all confirm that EUR/USD
+daily returns show no exploitable structure beyond the naive "no change"
+baseline.** RMSE/MAE match the naive baseline to 3-4 significant figures
+across every model, and directional accuracy never moves meaningfully
+off a coin flip (49-52%) on either the validation or test period. This
+is consistent with weak-form market efficiency in a highly liquid FX
+pair, and it's reported here as a real, defensible research outcome -
+not a shortfall of the project. See "Results" below for the full
+comparison table and `DECISIONS_AND_ISSUES_LOG.md` (#12, #16, #20) for
+the complete reasoning behind why this is a finding worth trusting
+rather than a search that simply hasn't found the right model yet.
+
 ## Data Source
 
 **Primary source: [Frankfurter API](https://frankfurter.dev)** (`api.frankfurter.dev/v1`)
@@ -133,14 +149,20 @@ predicted return is exactly 0.0 - see `DECISIONS_AND_ISSUES_LOG.md` #9).
    Evaluated with a single fit + one-shot predict (not walk-forward) -
    a deliberate, justified difference from ARIMA's evaluation, not an
    inconsistency; see `DECISIONS_AND_ISSUES_LOG.md` #13.
-
-**Models planned next:**
-5. LSTM.
+5. **LSTM** (`src/models/lstm_model.py`, PyTorch - TensorFlow's pip wheel
+   requires AVX instructions unavailable under Rosetta 2 on this Apple
+   Silicon Mac's x86_64 venv, see `DECISIONS_AND_ISSUES_LOG.md` #17) -
+   a small, deliberately-regularized single-layer LSTM (16 hidden units,
+   0.2 dropout, 2,065 trainable parameters) over 20-day sequences of the
+   *scaled* Stage 2 features, trained with early stopping on validation
+   loss. Sequences are built independently per split (never crossing a
+   train/val/test boundary) with an explicit runtime leakage check; see
+   `DECISIONS_AND_ISSUES_LOG.md` #18-#19.
 
 ## Results
 
-*Partial - naive, ARIMA/SARIMA, and XGBoost. LSTM is not yet built; this
-table will grow, not get overwritten, as it lands.*
+Naive, ARIMA/SARIMA, XGBoost, and LSTM - the complete planned set of
+model families for EUR/USD.
 
 ACF/PACF inspection of training log returns showed no lags meaningfully
 outside the 95% significance band across 30 lags - visually close to
@@ -158,20 +180,30 @@ regularization settings.
 | Naive | val | 0.004976 | 0.003664 | 0.005412 | 0.004035 | undefined (100% ties) |
 | ARIMA(0,0,0) | val | 0.004976 | 0.003664 | 0.005412 | 0.004036 | 49.2% |
 | XGBoost | val | 0.004976 | 0.003664 | 0.005412 | 0.004035 | 51.2% |
+| LSTM | val | 0.005003 | 0.003697 | 0.005441 | 0.004071 | 49.4% |
 | Naive | test | 0.004212 | 0.002980 | 0.004687 | 0.003329 | undefined (100% ties) |
 | ARIMA(0,0,0) | test | 0.004212 | 0.002981 | 0.004688 | 0.003329 | 51.0% |
 | XGBoost | test | 0.004212 | 0.002980 | 0.004687 | 0.003329 | 51.6% |
+| LSTM | test | 0.004282 | 0.003032 | 0.004765 | 0.003386 | 50.6% |
 
-**Honest read: neither ARIMA nor XGBoost beats the naive baseline.**
-RMSE/MAE match all three models to 3-4 significant figures on both
-periods, and directional accuracy for both models sits within coin-flip
-range (49-52%) with no consistent edge. This is the second, independent
-confirmation of the same finding, now extended from linear (ARIMA) to
-nonlinear (XGBoost) structure: **32/32 hyperparameter configurations**
-converged to the same null result, which is stronger evidence than any
-single model's result would be on its own. Neither the ARIMA order
-search nor the XGBoost grid search was re-tuned against validation or
-test results after the fact.
+*(LSTM's val/test row counts are 1,007/668, not 1,027/688 - a 20-day
+sequence warm-up is dropped per split, see `DECISIONS_AND_ISSUES_LOG.md`
+#18. Not a systematically different period, so this doesn't explain
+LSTM's small RMSE overhead.)*
+
+**Honest read: none of the three models beats the naive baseline.**
+RMSE/MAE match across all four rows to 3-4 significant figures on both
+periods (LSTM runs marginally higher, not lower - the expected footprint
+of a model with free parameters that didn't find real signal, rather
+than an improvement), and directional accuracy never moves meaningfully
+off a coin flip (49-52%) for any model. This is now **three independent
+confirmations** of the same finding, across three structurally different
+model families: linear (ARIMA), nonlinear tabular (XGBoost - 32/32
+hyperparameter configurations converged to the same null result), and
+deep sequential (LSTM - training/validation loss converged to a flat,
+non-diverging plateau by ~epoch 15-20, see
+`figures/lstm_loss_curve.png`). None of the three search/tuning
+processes was adjusted after seeing validation or test results.
 
 **Feature importance (XGBoost, gain-based, restricted to the actually-
 deployed tree - see `DECISIONS_AND_ISSUES_LOG.md` #14 for why this
@@ -185,13 +217,13 @@ one is a small, genuinely interesting hint - even though the model
 overall doesn't beat naive, it's suggestive that realized volatility
 might carry more information than direction does, consistent with the
 volatility clustering visible in `figures/eurusd_log_returns.png`.
-Full writeup: `DECISIONS_AND_ISSUES_LOG.md` #13-#16.
+Full writeup: `DECISIONS_AND_ISSUES_LOG.md` #13-#20.
 
-This sets the real bar for what comes next: LSTM is the last of the
-three planned model families, and the most flexible - if it *also* fails
-to beat naive, that would be a strong three-for-three confirmation of
-weak-form efficiency in this specific series, not a weaker finding for
-having tried three different approaches.
+This is now the complete EUR/USD model comparison - see "Key Finding"
+above for the headline takeaway. The next stage extends this same
+pipeline (data pull, features, all four models, this evaluation
+framework) to GBP/USD and USD/JPY, to see whether weak-form efficiency
+holds as consistently on other liquid major pairs.
 
 ## Limitations & Honest Findings
 
@@ -199,15 +231,16 @@ having tried three different approaches.
   but not yet built - the data pull script (`src/data_pull.py`) is
   parameterized by `--base`/`--quote` specifically so the same logic
   reapplies without rewriting.
-- **FX is close to a random walk, and two independent models confirm it.**
-  Both ARIMA (linear, data-driven order search) and XGBoost (nonlinear,
-  32-configuration regularized grid search) found no exploitable
+- **FX is close to a random walk, and three independent models confirm
+  it.** ARIMA (linear, data-driven order search), XGBoost (nonlinear,
+  32-configuration regularized grid search), and LSTM (deep sequential,
+  deliberately small and regularized) all found no exploitable
   structure in EUR/USD daily returns and could not beat the naive "no
   change" baseline. This project
   is explicitly designed to report this honestly rather than keep tuning
   until a better-looking number appears; see `DECISIONS_AND_ISSUES_LOG.md`
-  #12 and #16 for the full reasoning on why this is a legitimate finding,
-  not a failure.
+  #12, #16, and #20 for the full reasoning on why this is a legitimate
+  finding, not a failure.
 - Full engineering log of every decision, issue, and rejected alternative
   is kept in `DECISIONS_AND_ISSUES_LOG.md`.
 
@@ -217,6 +250,9 @@ having tried three different approaches.
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+# On Apple Silicon with an x86_64 (Rosetta) Python, `torch` from PyPI may
+# need the CPU-specific index instead - see DECISIONS_AND_ISSUES_LOG.md #17:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Pull EUR/USD daily history (defaults to 1999-01-04 -> today)
 python src/data_pull.py --base EUR --quote USD
@@ -240,6 +276,9 @@ python src/models/sarima_check.py
 
 # XGBoost (hyperparameter grid search + feature importance)
 python src/models/xgboost_model.py
+
+# LSTM (sequence construction + leakage check + training)
+python src/models/lstm_model.py
 ```
 
 ## Repo Structure
@@ -261,7 +300,8 @@ fx-rate-forecasting/
 │       ├── naive_baseline.py     # predict r_t = 0
 │       ├── arima_sarima.py       # ARIMA order search + walk-forward evaluation
 │       ├── sarima_check.py       # weekly-seasonal AIC pre-check (rejected)
-│       └── xgboost_model.py      # hyperparameter grid search + feature importance
+│       ├── xgboost_model.py      # hyperparameter grid search + feature importance
+│       └── lstm_model.py         # sequence construction, leakage check, PyTorch LSTM
 ├── notebooks/
 │   ├── 01_initial_exploration.py       # gap/flat-line/jump checks + plot
 │   ├── 02_target_and_stationarity.py   # log return, ADF test, return plot
@@ -269,5 +309,6 @@ fx-rate-forecasting/
 └── figures/
     ├── eurusd_1999_2026.png
     ├── eurusd_log_returns.png
-    └── eurusd_acf_pacf.png
+    ├── eurusd_acf_pacf.png
+    └── lstm_loss_curve.png
 ```

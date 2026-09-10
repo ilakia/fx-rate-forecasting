@@ -17,5 +17,8 @@ ipykernel
 
 xgboost
 
-# Modeling (later phase: LSTM)
-# tensorflow
+# LSTM. NOT tensorflow: TF's pip wheel requires AVX instructions, which
+# Rosetta 2 does not emulate on Apple Silicon under an x86_64 Python (see
+# DECISIONS_AND_ISSUES_LOG.md #17). Install the CPU build explicitly:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch

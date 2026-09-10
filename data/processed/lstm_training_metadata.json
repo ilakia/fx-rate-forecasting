@@ -1,0 +1,13 @@
+{
+  "window": 20,
+  "architecture": "LSTM(hidden=16, dropout=0.2) -> Linear(1)",
+  "n_trainable_params": 2065,
+  "n_epochs_ran": 56,
+  "best_epoch": 46,
+  "best_val_loss_mse": 2.5029816242749803e-05,
+  "train_loss_at_best_epoch": 3.884481816120943e-05,
+  "batch_size": 32,
+  "optimizer": "Adam(lr=0.001)",
+  "seed": 42,
+  "framework": "pytorch (see DECISIONS_AND_ISSUES_LOG.md for why not tensorflow)"
+}
