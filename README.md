@@ -9,6 +9,9 @@ world, which makes them a genuine stress test for whether any of these
 methods can find exploitable short-horizon structure at all - not a
 softball problem picked to guarantee an impressive-looking result.
 
+*Built with Claude Code. Scope, modeling decisions, and review by
+Ilakia Murugan.*
+
 ![EUR/USD daily reference rate, 1999-2026](figures/eurusd_1999_2026.png)
 
 ## Key Finding
