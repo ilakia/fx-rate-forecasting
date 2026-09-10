@@ -1,0 +1,14 @@
+# Core
+pandas
+numpy
+matplotlib
+requests
+
+# Notebook environment
+jupyter
+ipykernel
+
+# Modeling (later phases: ARIMA/SARIMA, XGBoost, LSTM)
+# statsmodels
+# xgboost
+# tensorflow
