@@ -812,6 +812,225 @@ whether the model's overall predictions are useful.
 
 ---
 
+## 17. TensorFlow crashes on import (AVX instructions unavailable under Rosetta 2) — switched to PyTorch
+
+**What happened:** `pip install tensorflow` succeeded, but
+`import tensorflow` crashed immediately with SIGABRT (exit code 134) and
+the message "The TensorFlow library was compiled to use AVX
+instructions, but these aren't available on your machine."
+
+**Why it happened:** Checked `platform.machine()` inside the project's
+venv and got `x86_64`, on a machine whose actual CPU is Apple Silicon
+(arm64) — confirming this venv's Python (inherited from the system's
+Anaconda base Python since the very first `python3 -m venv venv` back in
+Stage 1) is an x86_64 build running under Rosetta 2 translation, not a
+native arm64 Python. This had been silently true for every prior stage
+of this project without causing a problem, because pandas/numpy/
+statsmodels/xgboost's x86_64 wheels apparently don't hard-require AVX
+(or at least degrade gracefully). TensorFlow's official pip wheel does
+hard-require AVX and aborts immediately if it's missing — and Rosetta 2
+specifically does **not** emulate AVX/AVX2 instructions (a documented
+Rosetta 2 limitation), so any AVX-requiring x86_64 binary crashes
+outright when run through it on Apple Silicon.
+
+**What we did:** Rather than rebuild the entire project's venv from an
+arm64-native Python (which would mean reinstalling and re-verifying every
+package used since Stage 1, a large blast radius this late in the
+project, for a problem that's local to one library), switched the LSTM
+implementation from TensorFlow/Keras to **PyTorch** (CPU build,
+`pip install torch --index-url https://download.pytorch.org/whl/cpu`),
+which imported and ran without incident. This only changes which library
+implements the model — the architecture, training procedure, evaluation
+methodology, and results are unaffected by this choice, and PyTorch is
+an equally standard, widely-used framework for exactly this kind of model.
+
+**Why not the alternative:** Could have created a second, arm64-native
+venv (e.g. from `/usr/bin/python3`, confirmed arm64-native on this
+machine) just for the LSTM stage — rejected, since maintaining two
+separate Python environments for one project, with different
+architectures and dependency sets, adds real reproducibility risk (a
+future reader following "How to Reproduce" would need to know which venv
+runs which script) for no benefit once a same-venv fix (switching
+libraries) was available and worked immediately.
+
+**Concept tie-in:** Not a modeling concept — a reminder that a machine's
+reported architecture (`uname -m` showing `arm64`) doesn't guarantee
+every process on it runs natively; a specific Python interpreter/venv can
+be running under binary translation the whole time without any visible
+symptom, until a library with a stricter hardware requirement (AVX here)
+surfaces it.
+
+---
+
+## 18. LSTM sequence construction: window choice, per-split boundaries, and the leakage check
+
+**What happened:** Built `src/models/lstm_model.py`'s `build_sequences()`
+to turn the Stage 2 feature table into (sequence, target) pairs for the
+LSTM — the first model in this project to consume the feature set as an
+actual temporal sequence rather than one flattened row per prediction.
+
+**Window length: 20 trading days (~1 trading month).** Chosen to match
+the "long" rolling-stat window already established in Stage 2
+(`roll_std_20`/`roll_mean_20`) for the same underlying reasoning: long
+enough that a sequence can span more than one short-term volatility
+regime (the visible clustering in `figures/eurusd_log_returns.png` plays
+out over multi-week stretches, not single days), short enough that it
+doesn't meaningfully shrink the ~5,300-row training set. Reusing an
+already-justified window length, rather than picking a new arbitrary
+number, keeps the project's reasoning consistent across stages.
+
+**Per-split sequence boundaries.** Unlike XGBoost's single-row features
+(which could safely reach across a split boundary, since those features
+were computed once on the full continuous series back in Stage 2 and
+splitting happens afterward), LSTM sequences are built **independently
+per split** — a validation sequence's 20-day window never reaches back
+into training data, and a test sequence's window never reaches back into
+validation data. This is a stricter, more conservative boundary than
+strictly required (the underlying feature values are already "true past
+data" regardless of split, same as for XGBoost), chosen because a
+sequence model's whole premise is temporal continuity, and mixing
+which-split-supplied-which-timestep into one sequence adds a layer of
+bookkeeping complexity for no clear benefit here. The cost: each split's
+first 20 rows become unusable as prediction targets and are dropped
+(train 5,354 -> 5,334 sequences; val 1,027 -> 1,007; test 688 -> 668) —
+a small, explicitly documented reduction, not a silent one.
+
+**Leakage check.** `check_no_leakage()` independently verifies, for every
+sequence: (1) the last input row's date is strictly before the target
+date, (2) the target row immediately follows the last input row in the
+sorted dataframe (ruling out an off-by-one or gap slipping a future row
+into the window), and (3) for spot-checked sequences, the constructed
+input array matches an independently re-sliced window straight from the
+dataframe. This mirrors the same "recompute independently and compare"
+discipline Stage 2 applied to the lag/rolling features (#6), extended to
+a genuinely different data shape (3D sequences vs. flat rows).
+
+**Why not the alternative:** Could have let sequences span split
+boundaries (using the last ~20 days of train to seed val's earliest
+sequences, etc.), which would preserve slightly more usable rows per
+split — decided against it for the reason above (avoiding cross-split
+bookkeeping complexity), and because the number of rows lost (60 total
+across all three splits) is small relative to the total ~7,000-row
+dataset.
+
+**Concept tie-in:** Sequence-to-target alignment in recurrent models is
+a distinct leakage surface from the lag/rolling-feature leakage already
+handled in Stage 2 — same underlying principle (never let the model see
+information from at-or-after the prediction point), different mechanism
+to verify (index/date alignment across a 3D array, not a `.shift()` call).
+
+---
+
+## 19. LSTM architecture: kept deliberately small, given the null result from every prior model
+
+**What happened:** Built a minimal architecture: a single `LSTM(hidden
+_size=16)` layer, dropout (0.2) on its output, and a single `Linear(16,
+1)` output layer — 2,065 trainable parameters total, trained with Adam
+(lr=1e-3), batch size 32, up to 100 epochs with early stopping
+(patience=10) on validation loss.
+
+**Why it happened:** By this stage, both a linear model (ARIMA) and a
+flexible nonlinear tabular model (XGBoost, searched across 32
+hyperparameter configurations) had found no exploitable structure in
+this feature set. Starting from a large/deep architecture (multiple
+stacked LSTM layers, large hidden sizes, hundreds of thousands of
+parameters) on data that has now twice shown itself to be close to
+white noise would mean giving the model far more capacity to fit noise
+in the training set than there is real signal to find — a bigger model
+is not a more rigorous test of "is there signal here" once two other
+approaches have already characterized the signal as weak-to-absent; it's
+mainly a bigger overfitting risk.
+
+**What we did:** Started small and let the training curve itself confirm
+or challenge that choice, rather than assuming it. Training/validation
+loss both dropped quickly and converged to a stable plateau by
+~epoch 15-20 (`figures/lstm_loss_curve.png`), with early stopping firing
+at epoch 56 (best epoch 46) after 10 epochs of no further validation
+improvement — the two curves converge together and stay flat, with no
+divergence pattern (train continuing to drop while val flattens or rises)
+that would indicate the model is large enough to be overfitting. This
+is itself evidence the modest architecture was an appropriate choice for
+this problem, not an undersized one straining against real signal it
+couldn't capture.
+
+**Why not the alternative:** Could have tried a larger architecture "just
+to see" — deliberately avoided per this project's own instructions not
+to chase a better-looking number once regularization/early stopping are
+reasonably in place, and because the flat, converged, non-diverging
+loss curve gives no indication a larger model would find anything
+different — a larger model on this same data would most likely reach the
+same plateau, just with a longer and more expensive path there (and a
+higher risk of finding spurious in-sample structure along the way).
+
+**Concept tie-in:** Model capacity should be chosen relative to the
+evidenced amount of learnable signal, not maximized by default — this is
+the same reasoning already applied to XGBoost's regularization (#16),
+now applied to neural network sizing.
+
+---
+
+## 20. Final EUR/USD finding: three independent model families all confirm the same null result
+
+**What happened:** Evaluated the LSTM through the shared module and
+extended the running comparison table to all four approaches:
+
+| Model | Period | RMSE (return) | MAE (return) | Directional accuracy |
+|---|---|---|---|---|
+| Naive | val | 0.004976 | 0.003664 | undefined |
+| ARIMA(0,0,0) | val | 0.004976 | 0.003664 | 49.2% |
+| XGBoost | val | 0.004976 | 0.003664 | 51.2% |
+| LSTM | val | 0.005003 | 0.003697 | 49.4% |
+| Naive | test | 0.004212 | 0.002980 | undefined |
+| ARIMA(0,0,0) | test | 0.004212 | 0.002981 | 51.0% |
+| XGBoost | test | 0.004212 | 0.002980 | 51.6% |
+| LSTM | test | 0.004282 | 0.003032 | 50.6% |
+
+(LSTM's val/test row counts are 1,007/668 rather than 1,027/688 due to
+the 20-row sequence warm-up per split, #18 — the naive/ARIMA/XGBoost rows
+above are on the full split sizes, so LSTM's RMSE is not perfectly
+apples-to-apples row-for-row with the other three, though the 20 dropped
+rows at the start of each split are not a systematically different
+period and wouldn't plausibly explain the small gap on their own.)
+
+**Why it happened:** LSTM's RMSE is marginally *worse* than the other
+three (0.005003 vs. 0.004976 on val; 0.004282 vs. 0.004212 on test) —
+a small, consistent overhead rather than an improvement. This is
+consistent with a model that, like XGBoost, found no real predictive
+structure, but — unlike XGBoost's early-stopping-at-round-0 — still
+carries some inherent estimation noise from its parameters not landing
+at the exact trivial-prediction optimum, paying a tiny generalization
+cost for having free parameters at all. Directional accuracy (49.4%
+val, 50.6% test) again sits squarely in coin-flip range.
+
+**What we did:** Reported this as the third and final confirmation of
+the same finding already established twice (#12, #16), now covering all
+three planned model families. Drafted the project's headline finding for
+the README: **three independent modeling approaches — linear statistical
+(ARIMA), nonlinear tabular (XGBoost, 32/32 configurations), and deep
+sequential (LSTM) — all confirm that EUR/USD daily returns show no
+exploitable structure beyond the naive "no change" baseline**, consistent
+with weak-form market efficiency in a highly liquid FX pair. This is
+reported as a real, defensible research outcome, not as a project
+shortfall — see README "Key Finding" section.
+
+**Why not the alternative:** Could have kept adjusting the LSTM
+(different window length, larger hidden size, additional features)
+specifically until it beat naive on validation — explicitly avoided,
+for the same test/validation-integrity reasons already established in
+#12 and #16, and because three independently-built, differently-shaped
+models landing on the same conclusion is a *stronger* result than any
+one of them individually, not a reason to keep searching for an
+exception.
+
+**Concept tie-in:** Converging evidence across structurally different
+model families (linear, tree-based, recurrent) as a stronger form of
+validation than repeated tuning of a single model family; a small,
+consistent RMSE overhead (rather than a dramatic miss) as the expected
+signature of a flexible model that found no signal but still incurs
+some estimation variance, as distinct from a model that's actively wrong.
+
+---
+
 ## Template for future entries (keep using this format going forward)
 
 ## N. [Short description of what happened]
