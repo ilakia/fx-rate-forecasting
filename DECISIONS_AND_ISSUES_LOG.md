@@ -354,6 +354,255 @@ fit-on-train-only discipline extended to scalers, not just to features.
 
 ---
 
+## 8. pmdarima fails to import (numpy 2.0.2 ABI incompatibility) — fell back to manual order selection
+
+**What happened:** `pip install pmdarima` succeeded, but `import pmdarima`
+crashed immediately with `ValueError: numpy.dtype size changed, may
+indicate binary incompatibility. Expected 96 from C header, got 88 from
+PyObject`. Attempting to force a from-source rebuild
+(`--no-binary pmdarima`) failed differently, with a `ModuleNotFoundError:
+No module named 'distutils.msvccompiler'` coming from inside `numpy
+.distutils` during pmdarima's own build script.
+
+**Why it happened:** The venv installed numpy 2.0.2 (current stable), but
+pmdarima's published wheels were compiled against an older numpy ABI —
+numpy's C struct layouts changed between major versions, so a wheel built
+for old numpy segfaults/errors against new numpy at import time. The
+from-source fallback then hit a second, unrelated problem: pmdarima's
+build script still depends on `numpy.distutils`, which numpy itself
+deprecated and effectively removed, and which internally references a
+Windows-only compiler module that was never going to work on this Mac
+regardless of numpy version. Both routes are dead ends without either
+downgrading numpy (risking compatibility issues elsewhere in the
+project's dependency chain) or pmdarima shipping a numpy-2.x-compatible
+release.
+
+**What we did:** Uninstalled pmdarima and used the documented alternative
+instead: manual ACF/PACF inspection (`notebooks/03_acf_pacf_check.py`)
+followed by a small grid search over ARIMA(p,d,q) scored by AIC/BIC,
+fit on the training split only (`src/models/arima_sarima.py`).
+
+**Why not the alternative:** Could have pinned numpy to an older version
+compatible with pmdarima's wheels — rejected, since every other piece of
+this project (feature engineering, scaling, the evaluation module) was
+already built and tested against numpy 2.0.2, and downgrading it this
+late risks silently changing behavior elsewhere (e.g. `np.sign`,
+floating-point rounding) for a single convenience library. The manual
+ACF/PACF + AIC/BIC route is a legitimate, standard, and arguably more
+transparent method anyway — it doesn't hide the order-selection logic
+inside a black-box stepwise search.
+
+**Concept tie-in:** Not a modeling concept — a reminder that a compiled
+Python package can be functionally broken by a major dependency version
+bump even when `pip install` reports success; the failure only surfaces
+at import/runtime, not at install time.
+
+---
+
+## 9. Shared evaluation module: price-reconstruction convention and directional-accuracy tie policy
+
+**What happened:** Before building any model, wrote `src/evaluation/evaluate.py`
+so every model (naive, ARIMA now; XGBoost/LSTM later) is scored by
+identical logic — two conventions had to be picked explicitly rather than
+left implicit.
+
+**Decision 1 — price reconstruction uses the TRUE previous price, never a
+chained forecast.** Predicted price at day t is computed as `P_hat_t =
+P_{t-1}(true) * exp(r_hat_t)`, not `P_hat_{t-1}(predicted) * exp(r_hat_t)`.
+
+**Why:** Chaining predictions (each day's predicted price feeding the
+next day's reconstruction) lets small early-period errors compound
+multiplicatively over a long holdout period, so late-period price-level
+error would mostly reflect accumulated drift rather than that specific
+day's forecast quality — this would make the price-level RMSE/MAE
+numbers much harder to interpret and would unfairly penalize (or by luck,
+flatter) a model based on holdout length rather than actual skill. Using
+the true previous price at every step isolates each day's forecast in
+the same way the walk-forward evaluation methodology already does for
+returns, keeping the two metrics (return-scale and price-scale) telling
+a consistent story.
+
+**Decision 2 — directional-accuracy tie policy: exclude, don't force a
+verdict.** A day is excluded from the directional-accuracy denominator if
+EITHER the true return or the predicted return is exactly 0.0.
+
+**Why:** A return of exactly 0.0 (which genuinely occurs in this data —
+55 such days, see entry #4) has no defined sign to be "right" or "wrong"
+about, and neither does a model that predicts exactly 0.0. Forcing a
+tie-breaking convention either way (e.g. "0 counts as positive") would
+inject an arbitrary rule into the metric that doesn't reflect anything
+the model actually did. Excluding both from the denominator is applied
+identically to every model, so the metric stays comparable across models
+even though the number of excluded days differs (see naive baseline
+below — 100% of its days are ties by construction).
+
+**Why not the alternative:** Could have counted the naive baseline's
+constant 0.0 prediction as a directional "miss" every day (a common
+simplistic convention) — rejected, since that would make the naive
+baseline's directional accuracy a deterministic 0%, which looks like a
+strong result for any other model to beat by default, when in fact the
+naive baseline is making no directional claim at all and shouldn't be
+scored on a metric it's structurally incapable of engaging with.
+
+**Concept tie-in:** Designing an evaluation contract before any model
+exists, specifically so no single model's quirks (e.g. naive's
+degenerate direction) can silently bias the shared metric definition.
+
+---
+
+## 10. ARIMA order selection converges to (0,0,0) — no exploitable autocorrelation found
+
+**What happened:** ACF/PACF inspection of the training log-return series
+(`notebooks/03_acf_pacf_check.py`) showed essentially no lags outside the
+approximate 95% significance band across 30 lags — visually
+indistinguishable from white noise. A follow-up AIC/BIC grid search over
+ARIMA(p,d,q) for p,q in {0,1,2} and d in {0,1} (d=1 included specifically
+to double-check that over-differencing an already-stationary series
+doesn't spuriously score better — it didn't: the best d=1 candidate's AIC
+was clearly worse than every d=0 candidate) selected **ARIMA(0,0,0)** —
+i.e., a plain constant-mean model with no autoregressive or moving-average
+terms at all — as the best-fitting order by AIC.
+
+**Why it happened:** This is the expected outcome given the ADF test
+(#5) and the near-zero mean log return (#5's summary stats) — EUR/USD
+daily returns behave close to white noise around a mean indistinguishable
+from zero, so there's no linear autocorrelation structure for an ARIMA
+model to exploit. This is consistent with, not contradictory to, the
+random-walk framing this whole project is built around.
+
+**What we did:** Accepted ARIMA(0,0,0) as the selected order rather than
+forcing a more complex model because it "should" have more structure.
+Evaluated it via one-step-ahead walk-forward forecasting across the
+concatenated validation+test period (1,715 days total), where at each
+step the model forecasts one day ahead, then is extended with the true
+realized value. Refitting the full model at every single step would be
+correct but expensive across 1,715 steps; instead the model refits its
+parameters every 20 steps (~1 trading month) and simply extends its
+state (no re-estimation) in between — this took ~75 seconds end to end,
+against an estimated several-times-longer runtime for refit-every-step.
+Order selection itself never touched validation or test data — only the
+walk-forward evaluation loop sees them, one day at a time, in strict
+chronological order.
+
+**Why not the alternative:** Could have refit at every single step for
+maximum accuracy-per-step — decided the 20-step cadence is a reasonable
+tradeoff given how little the fitted parameters move step-to-step for a
+near-constant model like this one; a future revisit with more compute
+budget could re-run at refit_every=1 to confirm the results don't
+meaningfully change, but given ARIMA(0,0,0) has essentially one
+parameter (the mean), the risk of this cadence choice mattering is low.
+
+**Concept tie-in:** AIC/BIC-based order selection; walk-forward
+(rolling-origin) evaluation for time series, as distinct from either a
+single train/test fit-once-predict-all-at-once evaluation or a
+multi-step compounded forecast; refit cadence as a genuine
+compute-vs-freshness tradeoff, not a shortcut taken without justification.
+
+---
+
+## 11. SARIMA (weekly seasonal terms) rejected on AIC evidence, not run through full walk-forward
+
+**What happened:** Given the known FX day-of-week liquidity pattern
+observed during feature engineering (#6), tested whether adding weekly
+(m=5, one trading week) seasonal terms on top of the winning ARIMA(0,0,0)
+improves in-sample fit. Grid-searched SARIMA(0,0,0)x(P,0,Q,5) for P,Q in
+{0,1} against the plain ARIMA(0,0,0) baseline, all fit on train only.
+
+**Result:** Best seasonal candidate's AIC was *worse* than plain
+ARIMA(0,0,0) (AIC improvement of -1.6, i.e. actually negative — adding
+seasonal terms made the fit slightly worse once the extra parameters were
+penalized), well under the conventional "improvement of at least 2" rule
+of thumb for AIC to call a more complex model meaningfully better.
+
+**Why it happened:** This is consistent with, not contradictory to, the
+ACF/PACF check (#10 concept) — the day-of-week *liquidity* pattern
+(thinner Monday/Friday trading volume, a real and well-documented FX
+phenomenon) doesn't necessarily translate into a *return* pattern at the
+same weekly lag. Liquidity and directional predictability are different
+things; this data shows evidence for neither weekly return autocorrelation
+nor a seasonal model improving on the non-seasonal one.
+
+**What we did:** Rejected SARIMA based on this in-sample AIC evidence
+alone and did **not** run it through the ~75-second walk-forward
+evaluation, since there was no positive in-sample signal to justify the
+extra compute. Documented this as a real, reportable finding (no
+exploitable weekly seasonality in EUR/USD returns) rather than silently
+dropping the seasonal-terms idea without a paper trail.
+
+**Why not the alternative:** Could have run the full walk-forward
+evaluation on SARIMA anyway "just to be thorough" — decided against it,
+since the in-sample AIC comparison is the appropriate gate for this
+decision (a seasonal model that already fits worse in-sample, on the
+very data it was estimated from, has no plausible path to outperforming
+out-of-sample) and running the expensive walk-forward regardless would
+have been effort spent without a decision-relevant question left to
+answer.
+
+**Concept tie-in:** Using in-sample AIC as an efficient pre-filter before
+committing to expensive out-of-sample evaluation; the AIC "improvement of
+2" rule of thumb; distinguishing a liquidity/volume seasonal pattern from
+a return/predictability seasonal pattern — they are not the same claim.
+
+---
+
+## 12. Honest finding: ARIMA(0,0,0) is statistically indistinguishable from the naive baseline
+
+**What happened:** Assembled the final val/test comparison table for
+Stage 3 (`data/processed/model_comparison_stage3.csv`):
+
+| Model | Period | RMSE (return) | MAE (return) | RMSE (price) | MAE (price) | Directional accuracy |
+|---|---|---|---|---|---|---|
+| Naive | val | 0.004976 | 0.003664 | 0.005412 | 0.004035 | undefined (100% ties) |
+| ARIMA(0,0,0) | val | 0.004976 | 0.003664 | 0.005412 | 0.004036 | 49.2% (8 ties excluded) |
+| Naive | test | 0.004212 | 0.002980 | 0.004687 | 0.003329 | undefined (100% ties) |
+| ARIMA(0,0,0) | test | 0.004212 | 0.002981 | 0.004688 | 0.003329 | 51.0% (6 ties excluded) |
+
+RMSE/MAE match to 3-4 significant figures on both val and test. ARIMA's
+directional accuracy (49.2% val, 51.0% test) sits right on top of a coin
+flip (50%), with no consistent edge in either direction across the two
+periods.
+
+**Why it happened:** ARIMA(0,0,0) is, mechanically, a constant equal to
+the training mean log return (a tiny, near-zero number) — so its
+predictions are nearly identical to naive's flat 0.0 prediction on every
+single day, and the resulting RMSE/MAE are almost mathematically
+guaranteed to match closely. Its directional accuracy being ~50% simply
+reflects that the sign of a tiny near-zero constant relative to a
+genuinely noisy return series carries no real predictive information —
+it's arbitrary from the model's perspective, not evidence of skill.
+
+**What we did:** Reported this plainly as the Stage 3 headline finding,
+framed as a genuine and expected result about EUR/USD market behavior —
+**a linear time-series model finds no exploitable autocorrelation
+structure in daily returns, consistent with the (weak-form) efficient
+market / random-walk hypothesis for a highly liquid FX pair** — rather
+than as a project shortfall. No repeated re-tuning of the ARIMA order
+against test-set performance was done to try to manufacture a better-
+looking number; the order was selected once, against train only, before
+either validation or test was scored.
+
+**Why not the alternative:** Could have kept searching wider (p,q) ranges,
+different differencing, or exotic ARIMA variants specifically until
+something beat naive on test — explicitly avoided, since that would be
+p-hacking against the test set (the exact anti-pattern this project's own
+instructions call out), and because the ACF/PACF evidence (#10) already
+gives a principled reason to expect this outcome rather than treating it
+as a search that just hasn't found the right order yet. This result also
+sets a clear, honest bar: XGBoost and LSTM (nonlinear models, capable of
+finding structure a linear ARIMA cannot) are the more interesting test of
+whether *any* exploitable signal exists in this feature set — if they
+also fail to beat naive, that becomes an even stronger finding about this
+specific problem, not a weaker one.
+
+**Concept tie-in:** The random walk / efficient market hypothesis as an
+empirically testable claim, not just a theoretical assumption; why
+"the fancy model didn't beat the simple one" is itself a legitimate and
+reportable research finding rather than something to keep tuning away;
+avoiding test-set p-hacking by fixing the tuning boundary (validation
+only) before ever computing a test score.
+
+---
+
 ## Template for future entries (keep using this format going forward)
 
 ## N. [Short description of what happened]
