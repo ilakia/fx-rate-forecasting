@@ -15,6 +15,7 @@ joblib
 jupyter
 ipykernel
 
-# Modeling (later phases: XGBoost, LSTM)
-# xgboost
+xgboost
+
+# Modeling (later phase: LSTM)
 # tensorflow

@@ -125,45 +125,73 @@ predicted return is exactly 0.0 - see `DECISIONS_AND_ISSUES_LOG.md` #9).
    in-sample AIC evidence before spending walk-forward compute on it; see
    `DECISIONS_AND_ISSUES_LOG.md` #11.
 
+4. **XGBoost** (`src/models/xgboost_model.py`) - trained on the raw
+   (unscaled) feature columns from Stage 2. Hyperparameters selected via
+   a 32-combination grid search over regularization-relevant parameters
+   (max_depth, min_child_weight, subsample, colsample_bytree,
+   learning_rate), each trained with early stopping on validation RMSE.
+   Evaluated with a single fit + one-shot predict (not walk-forward) -
+   a deliberate, justified difference from ARIMA's evaluation, not an
+   inconsistency; see `DECISIONS_AND_ISSUES_LOG.md` #13.
+
 **Models planned next:**
-4. XGBoost.
 5. LSTM.
 
 ## Results
 
-*Partial - naive baseline and ARIMA/SARIMA only. XGBoost and LSTM are not
-yet built; this table will grow, not get overwritten, as they land.*
+*Partial - naive, ARIMA/SARIMA, and XGBoost. LSTM is not yet built; this
+table will grow, not get overwritten, as it lands.*
 
 ACF/PACF inspection of training log returns showed no lags meaningfully
 outside the 95% significance band across 30 lags - visually close to
 white noise. The resulting AIC/BIC grid search selected **ARIMA(0,0,0)**
 (a plain constant-mean model, no AR/MA terms) as the best order. A
 weekly-seasonal SARIMA variant was tested and rejected (AIC got slightly
-*worse* with seasonal terms added).
+*worse* with seasonal terms added). XGBoost's 32-combination hyperparameter
+grid search **independently converged to `best_iteration=0` in every
+single configuration** - the first tree already minimized validation
+RMSE, and every additional tree made it worse, regardless of
+regularization settings.
 
 | Model | Period | RMSE (return) | MAE (return) | RMSE (price) | MAE (price) | Directional accuracy |
 |---|---|---|---|---|---|---|
 | Naive | val | 0.004976 | 0.003664 | 0.005412 | 0.004035 | undefined (100% ties) |
 | ARIMA(0,0,0) | val | 0.004976 | 0.003664 | 0.005412 | 0.004036 | 49.2% |
+| XGBoost | val | 0.004976 | 0.003664 | 0.005412 | 0.004035 | 51.2% |
 | Naive | test | 0.004212 | 0.002980 | 0.004687 | 0.003329 | undefined (100% ties) |
 | ARIMA(0,0,0) | test | 0.004212 | 0.002981 | 0.004688 | 0.003329 | 51.0% |
+| XGBoost | test | 0.004212 | 0.002980 | 0.004687 | 0.003329 | 51.6% |
 
-**Honest read: ARIMA does not beat the naive baseline.** RMSE/MAE match
-to 3-4 significant figures, and ARIMA's directional accuracy sits right
-on a coin flip (49-51%) with no consistent edge across the two periods.
-This is expected, not a project shortfall: ARIMA(0,0,0) is mechanically
-just the training-mean return (a tiny, near-zero constant), so it makes
-almost the same prediction as naive's flat zero every day. The order
-search was run once against the training split only (never re-tuned
-against validation or test results), so this isn't a search that "hasn't
-found the right order yet" - the ACF/PACF evidence gives a principled
-reason to expect no linear autocorrelation structure exists to find.
-Full writeup: `DECISIONS_AND_ISSUES_LOG.md` #10-#12.
+**Honest read: neither ARIMA nor XGBoost beats the naive baseline.**
+RMSE/MAE match all three models to 3-4 significant figures on both
+periods, and directional accuracy for both models sits within coin-flip
+range (49-52%) with no consistent edge. This is the second, independent
+confirmation of the same finding, now extended from linear (ARIMA) to
+nonlinear (XGBoost) structure: **32/32 hyperparameter configurations**
+converged to the same null result, which is stronger evidence than any
+single model's result would be on its own. Neither the ARIMA order
+search nor the XGBoost grid search was re-tuned against validation or
+test results after the fact.
 
-This sets the real bar for what comes next: XGBoost and LSTM are
-nonlinear and could in principle find structure a linear ARIMA can't -
-if they *also* fail to beat naive, that's a stronger finding about this
-specific problem, not a weaker one.
+**Feature importance (XGBoost, gain-based, restricted to the actually-
+deployed tree - see `DECISIONS_AND_ISSUES_LOG.md` #14 for why this
+restriction mattered):** only 3 of 14 features have any nonzero gain at
+all - `roll_std_20` (the dominant one), `lag_1`, and `lag_5` - and the
+total gain across all three is tiny. **Day-of-week features show exactly
+zero importance** - the known FX day-of-week liquidity pattern does not
+translate into next-day return predictability that this model could
+exploit. The rolling-volatility feature being the most (if barely) used
+one is a small, genuinely interesting hint - even though the model
+overall doesn't beat naive, it's suggestive that realized volatility
+might carry more information than direction does, consistent with the
+volatility clustering visible in `figures/eurusd_log_returns.png`.
+Full writeup: `DECISIONS_AND_ISSUES_LOG.md` #13-#16.
+
+This sets the real bar for what comes next: LSTM is the last of the
+three planned model families, and the most flexible - if it *also* fails
+to beat naive, that would be a strong three-for-three confirmation of
+weak-form efficiency in this specific series, not a weaker finding for
+having tried three different approaches.
 
 ## Limitations & Honest Findings
 
@@ -171,14 +199,15 @@ specific problem, not a weaker one.
   but not yet built - the data pull script (`src/data_pull.py`) is
   parameterized by `--base`/`--quote` specifically so the same logic
   reapplies without rewriting.
-- **FX is close to a random walk, and the first real model confirms it.**
-  ARIMA - a linear time-series model with a data-driven order search -
-  found no exploitable autocorrelation structure in EUR/USD daily
-  returns and could not beat the naive "no change" baseline. This project
+- **FX is close to a random walk, and two independent models confirm it.**
+  Both ARIMA (linear, data-driven order search) and XGBoost (nonlinear,
+  32-configuration regularized grid search) found no exploitable
+  structure in EUR/USD daily returns and could not beat the naive "no
+  change" baseline. This project
   is explicitly designed to report this honestly rather than keep tuning
   until a better-looking number appears; see `DECISIONS_AND_ISSUES_LOG.md`
-  #12 for the full reasoning on why this is a legitimate finding, not a
-  failure.
+  #12 and #16 for the full reasoning on why this is a legitimate finding,
+  not a failure.
 - Full engineering log of every decision, issue, and rejected alternative
   is kept in `DECISIONS_AND_ISSUES_LOG.md`.
 
@@ -208,6 +237,9 @@ python notebooks/03_acf_pacf_check.py
 python src/models/naive_baseline.py
 python src/models/arima_sarima.py
 python src/models/sarima_check.py
+
+# XGBoost (hyperparameter grid search + feature importance)
+python src/models/xgboost_model.py
 ```
 
 ## Repo Structure
@@ -228,7 +260,8 @@ fx-rate-forecasting/
 │   └── models/
 │       ├── naive_baseline.py     # predict r_t = 0
 │       ├── arima_sarima.py       # ARIMA order search + walk-forward evaluation
-│       └── sarima_check.py       # weekly-seasonal AIC pre-check (rejected)
+│       ├── sarima_check.py       # weekly-seasonal AIC pre-check (rejected)
+│       └── xgboost_model.py      # hyperparameter grid search + feature importance
 ├── notebooks/
 │   ├── 01_initial_exploration.py       # gap/flat-line/jump checks + plot
 │   ├── 02_target_and_stationarity.py   # log return, ADF test, return plot
