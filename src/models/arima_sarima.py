@@ -1,5 +1,8 @@
 """
-ARIMA/SARIMA model for the EUR/USD log-return series.
+ARIMA/SARIMA model for an FX pair's log-return series. Originally built
+for EUR/USD (Stage 3); parameterized in Stage 6 to reapply unchanged to
+GBP/USD and USD/JPY via --prefix — order selection reruns independently
+per pair rather than assuming EUR/USD's ARIMA(0,0,0) result transfers.
 
 Order selection: pmdarima's auto_arima was attempted first but fails to
 import in this environment (numpy 2.0.2 / pmdarima ABI incompatibility —
@@ -16,6 +19,7 @@ day, and simply extends its state (no re-estimation) in between — a
 deliberate compute/accuracy tradeoff documented in the decisions log.
 """
 
+import argparse
 import itertools
 import json
 import time
@@ -35,10 +39,10 @@ PROCESSED = REPO_ROOT / "data" / "processed"
 REFIT_EVERY = 20  # ~1 trading month; see decisions log for the tradeoff
 
 
-def load_splits():
-    train = pd.read_csv(PROCESSED / "eurusd_train.csv", parse_dates=["date"])
-    val = pd.read_csv(PROCESSED / "eurusd_val.csv", parse_dates=["date"])
-    test = pd.read_csv(PROCESSED / "eurusd_test.csv", parse_dates=["date"])
+def load_splits(prefix: str):
+    train = pd.read_csv(PROCESSED / f"{prefix}_train.csv", parse_dates=["date"])
+    val = pd.read_csv(PROCESSED / f"{prefix}_val.csv", parse_dates=["date"])
+    test = pd.read_csv(PROCESSED / f"{prefix}_test.csv", parse_dates=["date"])
     return train, val, test
 
 
@@ -81,7 +85,12 @@ def walk_forward(train_returns: pd.Series, wf_returns: pd.Series, order, refit_e
 
 
 def main():
-    train, val, test = load_splits()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prefix", default="eurusd", help="e.g. eurusd, gbpusd, usdjpy")
+    args = parser.parse_args()
+    prefix = args.prefix
+
+    train, val, test = load_splits(prefix)
     train_r = train.set_index("date")["log_return"]
     val_r = val.set_index("date")["log_return"]
     test_r = test.set_index("date")["log_return"]
@@ -96,7 +105,7 @@ def main():
     order = (int(best["p"]), int(best["d"]), int(best["q"]))
     print(f"\nSelected order by AIC: {order}")
 
-    grid_path = REPO_ROOT / "data" / "processed" / "arima_order_grid_search.csv"
+    grid_path = REPO_ROOT / "data" / "processed" / f"{prefix}_arima_order_grid_search.csv"
     grid.to_csv(grid_path, index=False)
     print(f"Saved full grid search results to {grid_path}")
 
@@ -126,7 +135,7 @@ def main():
     print("\nARIMA walk-forward results:")
     print(table.to_string(index=False))
 
-    out_path = REPO_ROOT / "data" / "processed" / "arima_results.csv"
+    out_path = REPO_ROOT / "data" / "processed" / f"{prefix}_arima_results.csv"
     table.to_csv(out_path, index=False)
     print(f"Saved results to {out_path}")
 
@@ -137,7 +146,7 @@ def main():
         "pred_return": preds,
         "split": ["val"] * n_val + ["test"] * (len(preds) - n_val),
     })
-    preds_out = REPO_ROOT / "data" / "processed" / "arima_predictions.csv"
+    preds_out = REPO_ROOT / "data" / "processed" / f"{prefix}_arima_predictions.csv"
     preds_df.to_csv(preds_out, index=False, date_format="%Y-%m-%d")
     print(f"Saved predictions to {preds_out}")
 

@@ -1,43 +1,61 @@
 # FX Rate Forecasting
 
-Forecasting daily FX close prices (starting with EUR/USD, later extended
-to GBP/USD and USD/JPY) using a progression of time-series methods -
-classical statistical (ARIMA/SARIMA), gradient-boosted trees (XGBoost),
-and deep learning (LSTM) - with an emphasis on validating every result
-before trusting it, and being explicit about where forecasting FX is
-genuinely hard.
+Forecasting daily FX close prices for EUR/USD, GBP/USD, and USD/JPY
+using a progression of time-series methods - classical statistical
+(ARIMA/SARIMA), gradient-boosted trees (XGBoost), and deep learning
+(LSTM) - with an emphasis on validating every result before trusting it,
+and being explicit about where forecasting FX is genuinely hard.
 
-*This is an early-stage build. Sections below marked "(to come)" will be
-filled in as later phases land - see `DECISIONS_AND_ISSUES_LOG.md` for
-the full running log of what's been done and why.*
+*Core build (EUR/USD deep dive plus GBP/USD and USD/JPY cross-pair
+validation) is complete - see `DECISIONS_AND_ISSUES_LOG.md` for the full
+running log of what's been done and why.*
 
 ## Project Overview
 
 Foreign exchange rates are notoriously close to a random walk - unlike,
 say, retail demand or energy load, there's no strong seasonal or
 structural signal guaranteeing a model can beat a naive "tomorrow = today"
-baseline. This project takes that seriously: every model built here will
-be benchmarked against a naive persistence baseline, and if a fancier
-model can't beat it, that's reported as a real (and realistic) finding,
-not hidden.
+baseline. This project takes that seriously: every model built here is
+benchmarked against a naive persistence baseline, and if a fancier model
+can't beat it, that's reported as a real (and realistic) finding, not
+hidden.
 
-**Currency pairs (planned):** EUR/USD (current phase), GBP/USD, USD/JPY.
+**Currency pairs:** EUR/USD (primary deep-dive), GBP/USD, USD/JPY
+(cross-pair validation, same pipeline and standards).
 
-## Key Finding (EUR/USD)
+## Key Finding
 
 **Three independent modeling approaches - linear statistical (ARIMA),
-nonlinear tabular (XGBoost, searched across 32 hyperparameter
-configurations), and deep sequential (LSTM) - all confirm that EUR/USD
-daily returns show no exploitable structure beyond the naive "no change"
-baseline.** RMSE/MAE match the naive baseline to 3-4 significant figures
-across every model, and directional accuracy never moves meaningfully
-off a coin flip (49-52%) on either the validation or test period. This
-is consistent with weak-form market efficiency in a highly liquid FX
-pair, and it's reported here as a real, defensible research outcome -
-not a shortfall of the project. See "Results" below for the full
-comparison table and `DECISIONS_AND_ISSUES_LOG.md` (#12, #16, #20) for
-the complete reasoning behind why this is a finding worth trusting
-rather than a search that simply hasn't found the right model yet.
+nonlinear tabular (XGBoost), and deep sequential (LSTM) - confirm across
+all three major currency pairs (EUR/USD, GBP/USD, USD/JPY) that daily
+returns show no exploitable structure beyond the naive "no change"
+baseline.** RMSE/MAE match the naive baseline to within ~2% for every
+model, pair, and period (18 model x pair x period comparisons total, and
+not one shows a real, test-surviving improvement), and directional
+accuracy never reflects genuine skill once checked properly. This is
+consistent with weak-form market efficiency across highly liquid FX
+pairs, and it's reported here as a real, defensible research outcome -
+not a shortfall of the project.
+
+Two results looked like possible exceptions at first glance and were
+each investigated before being ruled out - this is why the finding is
+trustworthy rather than merely convenient:
+- **GBP/USD's ARIMA order search selected ARIMA(2,0,2)**, not the
+  trivial (0,0,0) every other pair converged to, with a "decisive" AIC
+  margin. Walk-forward evaluation showed it performs marginally *worse*
+  than naive on both validation and test - an in-sample fit that never
+  translated into real forecasting skill (`DECISIONS_AND_ISSUES_LOG.md` #24).
+- **USD/JPY's directional accuracy looked elevated for ARIMA/LSTM**
+  (~55-57% on test, vs. the ~49-52% coin-flip range everywhere else).
+  Investigation traced this to the test period's genuine 56.8%-positive-day
+  trend (real, sustained USD/JPY strength) colliding with each model's
+  own small, arbitrary constant-direction bias - confirmed by XGBoost's
+  *opposite* bias scoring *below* 50% on the identical period via the
+  identical mechanism (`DECISIONS_AND_ISSUES_LOG.md` #26).
+
+See "Results" below for the full per-pair tables and the unified
+cross-pair comparison, and `DECISIONS_AND_ISSUES_LOG.md` (#12, #16, #20,
+#24-#27) for the complete reasoning.
 
 ## Data Source
 
@@ -58,15 +76,28 @@ card even to sign up) and a **direct ECB SDW pull** (works fine, same
 data, but a more brittle SDMX format to maintain across three currency
 pairs). Full reasoning for both in `DECISIONS_AND_ISSUES_LOG.md` (#1, #2).
 
-**Currently pulled data:** EUR/USD daily close, 1999-01-04 to 2026-09-10
-(7,090 rows). See `data/processed/eurusd_daily.csv`.
+**Currently pulled data:** all three pairs, daily close, 1999-01-04 to
+2026-09-10 (7,090 rows each, identical calendar) - `eurusd_daily.csv`,
+`gbpusd_daily.csv`, `usdjpy_daily.csv` in `data/processed/`.
+
+**GBP/USD and USD/JPY are ECB-implied cross rates, not independently
+quoted.** The ECB only publishes reference rates against EUR, so
+Frankfurter derives GBP/USD as EUR/USD ÷ EUR/GBP (verified to match
+Frankfurter's own directly-returned value to 4 decimal places on a
+sample date) - standard, reliable methodology, but a real provenance
+distinction from EUR/USD's directly-observed rate. See
+`DECISIONS_AND_ISSUES_LOG.md` (#21).
 
 **Gap handling:** FX markets don't trade on weekends or Eurosystem
 (TARGET2) holidays. These calendar gaps are real and expected - they are
 **not** imputed, forward-filled, or otherwise treated as missing data.
 Every gap longer than a normal weekend was checked and lines up with a
-known holiday closure (Christmas/New Year, Good Friday/Easter Monday).
-See `DECISIONS_AND_ISSUES_LOG.md` (#4) for the full data quality check.
+known holiday closure (Christmas/New Year, Good Friday/Easter Monday) -
+identical across all three pairs, since all three are published on the
+same ECB schedule. See `DECISIONS_AND_ISSUES_LOG.md` (#4, #22) for the
+full data quality checks, including GBP/USD's one genuine >5% single-day
+move (2016-06-24, the Brexit referendum result day - confirmed real, not
+a data defect).
 
 ## Methodology
 
@@ -117,6 +148,16 @@ split boundaries (and why the validation window deliberately spans the
 COVID crash and the 2022 rate-hike shock) is in
 `DECISIONS_AND_ISSUES_LOG.md` #7.
 
+**The entire pipeline above (target, features, split, evaluation module,
+all four models) is reused unchanged for GBP/USD and USD/JPY** - every
+script in `src/` and `notebooks/` takes a `--prefix` argument
+(`eurusd`/`gbpusd`/`usdjpy`), and the same year-boundary split, feature
+set, and model architectures apply identically to all three pairs. Each
+pair's own ADF test, ARIMA order search, XGBoost hyperparameter search,
+and LSTM training reran independently rather than reusing EUR/USD's
+selected order/hyperparameters - see "Results" below and
+`DECISIONS_AND_ISSUES_LOG.md` #21-#27 for the cross-pair findings.
+
 **Shared evaluation module** (`src/evaluation/evaluate.py`) - every model
 (naive, ARIMA now; XGBoost/LSTM next) is scored by identical logic:
 RMSE/MAE on the log-return scale, RMSE/MAE reconstructed to price level
@@ -161,6 +202,8 @@ predicted return is exactly 0.0 - see `DECISIONS_AND_ISSUES_LOG.md` #9).
 
 ## Results
 
+### EUR/USD
+
 Naive, ARIMA/SARIMA, XGBoost, and LSTM - the complete planned set of
 model families for EUR/USD.
 
@@ -202,7 +245,7 @@ model families: linear (ARIMA), nonlinear tabular (XGBoost - 32/32
 hyperparameter configurations converged to the same null result), and
 deep sequential (LSTM - training/validation loss converged to a flat,
 non-diverging plateau by ~epoch 15-20, see
-`figures/lstm_loss_curve.png`). None of the three search/tuning
+`figures/eurusd_lstm_loss_curve.png`). None of the three search/tuning
 processes was adjusted after seeing validation or test results.
 
 **Feature importance (XGBoost, gain-based, restricted to the actually-
@@ -219,28 +262,129 @@ might carry more information than direction does, consistent with the
 volatility clustering visible in `figures/eurusd_log_returns.png`.
 Full writeup: `DECISIONS_AND_ISSUES_LOG.md` #13-#20.
 
-This is now the complete EUR/USD model comparison - see "Key Finding"
-above for the headline takeaway. The next stage extends this same
-pipeline (data pull, features, all four models, this evaluation
-framework) to GBP/USD and USD/JPY, to see whether weak-form efficiency
-holds as consistently on other liquid major pairs.
+### GBP/USD
+
+Same pipeline, same standards, rerun independently - see
+`DECISIONS_AND_ISSUES_LOG.md` #21-#24 for data quality and ADF detail.
+GBP/USD's own AIC/BIC search selected **ARIMA(2,0,2)**, not the trivial
+null every other pair converged to - investigated in #24 and found not
+to survive out-of-sample evaluation (RMSE marginally worse than naive on
+both val and test).
+
+| Model | Period | RMSE (return) | MAE (return) | RMSE (price) | MAE (price) | Directional accuracy |
+|---|---|---|---|---|---|---|
+| Naive | val | 0.006109 | 0.004431 | 0.007592 | 0.005604 | undefined (100% ties) |
+| ARIMA(2,0,2) | val | 0.006118 | 0.004451 | 0.007604 | 0.005630 | 48.2% |
+| XGBoost | val | 0.006109 | 0.004432 | 0.007592 | 0.005605 | 49.4% |
+| LSTM | val | 0.006151 | 0.004481 | 0.007643 | 0.005666 | 49.3% |
+| Naive | test | 0.004247 | 0.003114 | 0.005548 | 0.004075 | undefined (100% ties) |
+| ARIMA(2,0,2) | test | 0.004261 | 0.003123 | 0.005565 | 0.004087 | 52.9% |
+| XGBoost | test | 0.004249 | 0.003116 | 0.005549 | 0.004078 | 47.9% |
+| LSTM | test | 0.004315 | 0.003178 | 0.005639 | 0.004162 | 46.2% |
+
+XGBoost again converged to `best_iteration=0` (trivial prediction).
+Feature importance was again dominated by `roll_std_20` (38% of total
+gain), with day-of-week contributing a small but nonzero 3.8% (driven
+almost entirely by `dow_mon`) - still far too small to represent a
+usable signal, and consistent with EUR/USD's near-zero day-of-week
+result. GBP/USD's raw return series includes one genuine >5% single-day
+move (the 2016 Brexit shock, entry #22) inside the training window;
+none of the models beat naive despite that extra volatility being
+available to learn from.
+
+### USD/JPY
+
+Same pipeline again. ADF and SARIMA checks both confirm the same
+pattern as the other two pairs (`DECISIONS_AND_ISSUES_LOG.md` #23,
+sarima rejected on AIC). XGBoost's search behaved differently here - 314
+deployed trees rather than instant convergence, with a small validation
+improvement that did not survive on test (entry #25).
+
+| Model | Period | RMSE (return) | MAE (return) | RMSE (price) | MAE (price) | Directional accuracy |
+|---|---|---|---|---|---|---|
+| Naive | val | 0.006105 | 0.004060 | 0.789008 | 0.509513 | undefined (100% ties) |
+| ARIMA(0,0,0) | val | 0.006105 | 0.004060 | 0.789041 | 0.509420 | 50.5% |
+| XGBoost | val | 0.006096 | 0.004054 | 0.787635 | 0.508737 | 54.6% |
+| LSTM | val | 0.006151 | 0.004085 | 0.795305 | 0.512891 | 54.8% |
+| Naive | test | 0.006149 | 0.004280 | 0.927657 | 0.648169 | undefined (100% ties) |
+| ARIMA(0,0,0) | test | 0.006149 | 0.004275 | 0.927666 | 0.647410 | 56.9% |
+| XGBoost | test | 0.006153 | 0.004280 | 0.928287 | 0.648226 | 46.3% |
+| LSTM | test | 0.006210 | 0.004246 | 0.938074 | 0.643751 | 56.2% |
+
+**The directional-accuracy numbers here need the caveat spelled out in
+`DECISIONS_AND_ISSUES_LOG.md` #26: they are not evidence of real skill.**
+USD/JPY's test period (2024-2026) had 391 up-days vs. 296 down-days
+(56.8% positive) - a genuine, well-known sustained uptrend. ARIMA's
+walk-forward-updated constant predicted a **positive** return on all 688
+test days (inheriting a positive drift from train+val history); a model
+that always guesses the majority class in an imbalanced period scores
+above 50% by construction, with zero real day-to-day skill required.
+XGBoost's predictions skewed the **opposite** way (403 negative vs. 285
+positive) and scored *below* 50% via the identical mechanism, in the
+identical period - confirming this is about each model's arbitrary
+constant-ish bias meeting a real trend, not about which model
+"understands" USD/JPY better. RMSE - which doesn't care about class
+balance - independently confirms no real skill: every model is within
+~1% of naive on both periods.
+
+### Cross-Pair Comparison
+
+Unified table (`data/processed/cross_pair_comparison.csv`,
+`src/cross_pair_comparison.py`) computing each model's RMSE ratio to
+naive for every pair x period. Across all 3 pairs x 3 non-naive models x
+2 periods = **18 comparisons, not one shows a ratio below 0.98**
+(i.e. a real >2% RMSE improvement over naive):
+
+| Pair | Model | Val ratio | Test ratio |
+|---|---|---|---|
+| EUR/USD | ARIMA | 1.0001 | 1.0001 |
+| EUR/USD | XGBoost | 1.0000 | 1.0000 |
+| EUR/USD | LSTM | 1.0055 | 1.0167 |
+| GBP/USD | ARIMA | 1.0014 | 1.0031 |
+| GBP/USD | XGBoost | 1.0000 | 1.0003 |
+| GBP/USD | LSTM | 1.0069 | 1.0158 |
+| USD/JPY | ARIMA | 1.0000 | 1.0000 |
+| USD/JPY | XGBoost | 0.9987 | 1.0007 |
+| USD/JPY | LSTM | 1.0076 | 1.0099 |
+
+**The EUR/USD finding generalizes cleanly to all three major pairs.**
+Three structurally different model families, applied identically across
+three pairs with genuinely different macro histories (EUR/USD's steady
+multi-year cycles, GBP/USD's Brexit shock, USD/JPY's sustained
+2022-2025 uptrend), converge on the same answer: no exploitable
+short-horizon structure beyond the naive baseline, using price-derived
+features alone. The two results that looked like possible exceptions
+(GBP/USD's ARIMA(2,0,2), USD/JPY's elevated directional accuracy) were
+each investigated and traced to a specific, understood mechanism rather
+than real predictive skill - which is why this is reported as a
+strengthened finding, not a weaker one for having looked closer.
+Full reasoning: `DECISIONS_AND_ISSUES_LOG.md` #21-#27.
 
 ## Limitations & Honest Findings
 
-- **Only EUR/USD has been pulled so far.** GBP/USD and USD/JPY are planned
-  but not yet built - the data pull script (`src/data_pull.py`) is
-  parameterized by `--base`/`--quote` specifically so the same logic
-  reapplies without rewriting.
-- **FX is close to a random walk, and three independent models confirm
-  it.** ARIMA (linear, data-driven order search), XGBoost (nonlinear,
-  32-configuration regularized grid search), and LSTM (deep sequential,
-  deliberately small and regularized) all found no exploitable
-  structure in EUR/USD daily returns and could not beat the naive "no
-  change" baseline. This project
-  is explicitly designed to report this honestly rather than keep tuning
-  until a better-looking number appears; see `DECISIONS_AND_ISSUES_LOG.md`
-  #12, #16, and #20 for the full reasoning on why this is a legitimate
-  finding, not a failure.
+- **FX is close to a random walk, and it holds across three pairs and
+  three model families.** ARIMA (linear, data-driven order search per
+  pair), XGBoost (nonlinear, 32-configuration regularized grid search
+  per pair), and LSTM (deep sequential, deliberately small and
+  regularized, same architecture per pair) all found no exploitable
+  structure in EUR/USD, GBP/USD, or USD/JPY daily returns and could not
+  beat the naive "no change" baseline on any of the 18 model x pair x
+  period combinations. This project is explicitly designed to report
+  this honestly rather than keep tuning until a better-looking number
+  appears; see `DECISIONS_AND_ISSUES_LOG.md` #12, #16, #20, and #27 for
+  the full reasoning on why this is a legitimate finding, not a failure.
+- **Directional accuracy is not a safe metric on its own for a trending
+  series with imbalanced up/down day counts** - USD/JPY's ARIMA/LSTM
+  scored above 50% on test purely because their arbitrary constant bias
+  happened to align with a real, sustained trend, while XGBoost's
+  opposite bias scored below 50% via the same mechanism. Always cross-
+  check directional accuracy against RMSE before trusting it; see
+  `DECISIONS_AND_ISSUES_LOG.md` #26.
+- **GBP/USD and USD/JPY are ECB-implied cross rates** (triangulated via
+  EUR/USD and EUR/GBP or EUR/JPY), not independently quoted the way
+  EUR/USD is - standard methodology, verified to match Frankfurter's own
+  values, but a real provenance distinction worth knowing; see
+  `DECISIONS_AND_ISSUES_LOG.md` #21.
 - Full engineering log of every decision, issue, and rejected alternative
   is kept in `DECISIONS_AND_ISSUES_LOG.md`.
 
@@ -253,32 +397,43 @@ pip install -r requirements.txt
 # On Apple Silicon with an x86_64 (Rosetta) Python, `torch` from PyPI may
 # need the CPU-specific index instead - see DECISIONS_AND_ISSUES_LOG.md #17:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
 
-# Pull EUR/USD daily history (defaults to 1999-01-04 -> today)
-python src/data_pull.py --base EUR --quote USD
+Every script below takes `--prefix` (default `eurusd`; also `gbpusd`,
+`usdjpy`) and/or `--base`/`--quote`, so the full pipeline reruns
+identically for any of the three pairs:
 
-# Run the exploratory data quality checks + plot
-python notebooks/01_initial_exploration.py
+```bash
+# Pull daily history (defaults to 1999-01-04 -> today)
+python src/data_pull.py --base EUR --quote USD      # -> eurusd_daily.csv
+python src/data_pull.py --base GBP --quote USD      # -> gbpusd_daily.csv
+python src/data_pull.py --base USD --quote JPY      # -> usdjpy_daily.csv
 
-# Compute log returns, run the ADF stationarity test, plot returns
-python notebooks/02_target_and_stationarity.py
+# Exploratory data quality checks + plot (repeat --prefix for each pair)
+python notebooks/01_initial_exploration.py --prefix eurusd --label "EUR/USD"
 
-# Build features, run the leakage check, and produce the train/val/test split
+# Log returns, ADF stationarity test, return plot
+python notebooks/02_target_and_stationarity.py --prefix eurusd --label "EUR/USD"
+
+# Features, leakage check, train/val/test split
 python src/feature_engineering.py --input data/processed/eurusd_daily.csv --prefix eurusd
 
 # ACF/PACF inspection to inform ARIMA order selection
-python notebooks/03_acf_pacf_check.py
+python notebooks/03_acf_pacf_check.py --prefix eurusd
 
 # Naive baseline, ARIMA (order search + walk-forward), SARIMA seasonal check
-python src/models/naive_baseline.py
-python src/models/arima_sarima.py
-python src/models/sarima_check.py
+python src/models/naive_baseline.py --prefix eurusd
+python src/models/arima_sarima.py --prefix eurusd
+python src/models/sarima_check.py --prefix eurusd
 
 # XGBoost (hyperparameter grid search + feature importance)
-python src/models/xgboost_model.py
+python src/models/xgboost_model.py --prefix eurusd
 
 # LSTM (sequence construction + leakage check + training)
-python src/models/lstm_model.py
+python src/models/lstm_model.py --prefix eurusd
+
+# Once all three pairs have been run through the steps above:
+python src/cross_pair_comparison.py
 ```
 
 ## Repo Structure
@@ -294,12 +449,13 @@ fx-rate-forecasting/
 ├── src/
 │   ├── data_pull.py              # reusable pull script, any currency pair
 │   ├── feature_engineering.py    # reusable feature/split builder, any pair
+│   ├── cross_pair_comparison.py  # assembles the unified 3-pair comparison table
 │   ├── evaluation/
 │   │   └── evaluate.py           # shared scoring module, used by every model
 │   └── models/
 │       ├── naive_baseline.py     # predict r_t = 0
 │       ├── arima_sarima.py       # ARIMA order search + walk-forward evaluation
-│       ├── sarima_check.py       # weekly-seasonal AIC pre-check (rejected)
+│       ├── sarima_check.py       # weekly-seasonal AIC pre-check
 │       ├── xgboost_model.py      # hyperparameter grid search + feature importance
 │       └── lstm_model.py         # sequence construction, leakage check, PyTorch LSTM
 ├── notebooks/
@@ -307,8 +463,14 @@ fx-rate-forecasting/
 │   ├── 02_target_and_stationarity.py   # log return, ADF test, return plot
 │   └── 03_acf_pacf_check.py            # ACF/PACF inspection for ARIMA order
 └── figures/
-    ├── eurusd_1999_2026.png
-    ├── eurusd_log_returns.png
-    ├── eurusd_acf_pacf.png
-    └── lstm_loss_curve.png
+    ├── {prefix}_1999_2026.png          # raw price plot, per pair
+    ├── {prefix}_log_returns.png        # log return plot, per pair
+    ├── {prefix}_acf_pacf.png           # ACF/PACF plot, per pair
+    └── eurusd_lstm_loss_curve.png, gbpusd_lstm_loss_curve.png, usdjpy_lstm_loss_curve.png
 ```
+
+All model scripts and notebooks above are the same file reused across
+all three pairs (`--prefix eurusd|gbpusd|usdjpy`) - nothing is
+duplicated per pair. `data/processed/` holds each pair's own
+`{prefix}_*` outputs (splits, scaler, grid searches, model artifacts,
+results) plus the final `cross_pair_comparison.csv`.

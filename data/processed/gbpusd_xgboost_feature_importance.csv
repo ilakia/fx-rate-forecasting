@@ -1,0 +1,15 @@
+feature,gain
+roll_std_20,0.000860824948
+lag_3,0.000672062044
+lag_4,0.0006326365253
+dow_mon,8.58030253e-05
+lag_5,1.4695368e-05
+lag_1,0.0
+lag_2,0.0
+roll_mean_5,0.0
+roll_std_5,0.0
+roll_mean_20,0.0
+dow_tue,0.0
+dow_wed,0.0
+dow_thu,0.0
+dow_fri,0.0
