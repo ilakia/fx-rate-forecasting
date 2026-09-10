@@ -52,18 +52,60 @@ Every gap longer than a normal weekend was checked and lines up with a
 known holiday closure (Christmas/New Year, Good Friday/Easter Monday).
 See `DECISIONS_AND_ISSUES_LOG.md` (#4) for the full data quality check.
 
-## Methodology (to come)
+## Methodology
 
-Planned progression:
-1. Feature engineering (lags, rolling stats, calendar features) - trading-day
-   aware, not calendar-day aware.
-2. Naive persistence baseline (mandatory reference point for everything else).
-3. ARIMA/SARIMA.
-4. XGBoost.
-5. LSTM.
+**Target variable: daily log return**, `r_t = ln(P_t / P_{t-1})`, not raw
+price. An Augmented Dickey-Fuller test confirmed the raw close series is
+non-stationary (p = 0.32) while the log return series is strongly
+stationary (p < 1e-6) - see `DECISIONS_AND_ISSUES_LOG.md` #5 for the full
+test output. This makes the naive baseline every model must beat
+completely unambiguous: **predict r_t = 0** (the random-walk hypothesis).
+The raw close series is kept throughout so return predictions can be
+converted back to price levels for plots and directional-accuracy checks.
 
-Not yet started - see "What NOT to do in this session" note: this phase
-was scoped to data source selection and the initial pull only.
+**Feature set** (`src/feature_engineering.py`), shared across the ML/DL
+models:
+- `lag_1` .. `lag_5` - the previous 5 trading days' log returns (one
+  trading week; FX return autocorrelation is weak beyond a few days for
+  a liquid major pair, so this isn't trimmed shorter or extended further
+  without evidence it helps).
+- `roll_mean_5` / `roll_std_5` and `roll_mean_20` / `roll_std_20` -
+  rolling return statistics over 1 week and ~1 trading month. The rolling
+  std terms are a realized-volatility proxy, motivated by visible
+  volatility clustering in the return series (calmer 2015-2019, choppier
+  2008-2009 and 2022 - see `figures/eurusd_log_returns.png`).
+- `dow_mon` .. `dow_fri` - one-hot day-of-week, included as a candidate
+  feature on the strength of known FX day-of-week liquidity patterns;
+  left to feature-importance analysis at training time to confirm or
+  reject, not judged here.
+
+All rolling/lag features are computed with `.shift(1)` applied **before**
+any `.rolling()` call, so a feature at row t only ever sees r_{t-1} and
+earlier - verified with an explicit runtime assertion in
+`feature_engineering.py`, not just asserted in prose. See
+`DECISIONS_AND_ISSUES_LOG.md` #6 for the full leakage-prevention writeup.
+
+**Train / validation / test split** - chronological (never shuffled),
+at calendar-year boundaries:
+
+| Split | Date range | Rows |
+|---|---|---|
+| Train | 1999-02-02 -> 2019-12-31 | 5,354 |
+| Validation | 2020-01-02 -> 2023-12-29 | 1,027 |
+| Test | 2024-01-02 -> 2026-09-10 | 688 |
+
+Feature scaling is fit only on the training split and applied (not
+re-fit) to validation/test; the fitted scaler is persisted to
+`data/processed/eurusd_feature_scaler.joblib`. Full reasoning for the
+split boundaries (and why the validation window deliberately spans the
+COVID crash and the 2022 rate-hike shock) is in
+`DECISIONS_AND_ISSUES_LOG.md` #7.
+
+**Models planned next** (not yet built - out of scope for this phase):
+1. Naive persistence baseline (r_t = 0) - the mandatory reference point.
+2. ARIMA/SARIMA.
+3. XGBoost.
+4. LSTM.
 
 ## Results (to come)
 
@@ -94,6 +136,12 @@ python src/data_pull.py --base EUR --quote USD
 
 # Run the exploratory data quality checks + plot
 python notebooks/01_initial_exploration.py
+
+# Compute log returns, run the ADF stationarity test, plot returns
+python notebooks/02_target_and_stationarity.py
+
+# Build features, run the leakage check, and produce the train/val/test split
+python src/feature_engineering.py --input data/processed/eurusd_daily.csv --prefix eurusd
 ```
 
 ## Repo Structure
@@ -105,11 +153,14 @@ fx-rate-forecasting/
 ├── requirements.txt
 ├── data/
 │   ├── raw/                      # untouched API responses
-│   └── processed/                # cleaned, deduplicated daily series
+│   └── processed/                # cleaned daily series, feature tables, splits, scaler
 ├── src/
-│   └── data_pull.py              # reusable pull script, any currency pair
+│   ├── data_pull.py              # reusable pull script, any currency pair
+│   └── feature_engineering.py    # reusable feature/split builder, any pair
 ├── notebooks/
-│   └── 01_initial_exploration.py # gap/flat-line/jump checks + plot
+│   ├── 01_initial_exploration.py       # gap/flat-line/jump checks + plot
+│   └── 02_target_and_stationarity.py   # log return, ADF test, return plot
 └── figures/
-    └── eurusd_1999_2026.png
+    ├── eurusd_1999_2026.png
+    └── eurusd_log_returns.png
 ```

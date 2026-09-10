@@ -4,11 +4,17 @@ numpy
 matplotlib
 requests
 
+# Stationarity testing (ADF) and later ARIMA/SARIMA
+statsmodels
+
+# Feature scaling and later XGBoost feature-importance evaluation
+scikit-learn
+joblib
+
 # Notebook environment
 jupyter
 ipykernel
 
-# Modeling (later phases: ARIMA/SARIMA, XGBoost, LSTM)
-# statsmodels
+# Modeling (later phases: XGBoost, LSTM)
 # xgboost
 # tensorflow
