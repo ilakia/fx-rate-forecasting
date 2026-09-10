@@ -1,0 +1,43 @@
+{
+  "prefix": "gbpusd",
+  "feature_columns": [
+    "lag_1",
+    "lag_2",
+    "lag_3",
+    "lag_4",
+    "lag_5",
+    "roll_mean_5",
+    "roll_std_5",
+    "roll_mean_20",
+    "roll_std_20",
+    "dow_mon",
+    "dow_tue",
+    "dow_wed",
+    "dow_thu",
+    "dow_fri"
+  ],
+  "lag_depth": 5,
+  "short_window": 5,
+  "long_window": 20,
+  "train_end": "2019-12-31",
+  "val_end": "2023-12-31",
+  "split_sizes": {
+    "train": 5354,
+    "val": 1027,
+    "test": 688
+  },
+  "split_date_ranges": {
+    "train": [
+      "1999-02-02",
+      "2019-12-31"
+    ],
+    "val": [
+      "2020-01-02",
+      "2023-12-29"
+    ],
+    "test": [
+      "2024-01-02",
+      "2026-09-10"
+    ]
+  }
+}

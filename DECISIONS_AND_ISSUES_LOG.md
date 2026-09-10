@@ -1031,6 +1031,339 @@ some estimation variance, as distinct from a model that's actively wrong.
 
 ---
 
+## 21. Cross-pair pull: GBP/USD and USD/JPY are ECB-implied cross rates, not independently quoted
+
+**What happened:** Pulled GBP/USD and USD/JPY through the existing
+`data_pull.py` (unchanged) and got the identical 7,090-row history
+(1999-01-04 to 2026-09-10) as EUR/USD, with no reduced availability.
+While verifying the pull, cross-checked whether these are genuinely
+independent market quotes or derived rates: fetched EUR/USD and EUR/GBP
+for 2024-01-03 directly (1.0919 and 0.8647) and computed
+1.0919 / 0.8647 = 1.26282 — which matches Frankfurter's directly-returned
+GBP/USD rate for that date (1.2628) essentially exactly.
+
+**Why it happened:** The ECB only publishes reference rates against EUR
+(it has no mandate to fix non-EUR cross rates), so Frankfurter/ECB-sourced
+GBP/USD and USD/JPY are **triangulated cross rates**
+(GBP/USD = EUR/USD ÷ EUR/GBP), not independently observed market
+transactions the way EUR/USD is. This is standard, widely-accepted
+methodology (most retail/reference-rate providers for non-EUR-base pairs
+do exactly this), but it's a real provenance distinction worth being
+explicit about rather than silently treating all three pairs as
+identically-sourced.
+
+**What we did:** Documented this plainly here rather than only in a
+verification script; kept using the pulled data as-is since triangulated
+ECB cross rates are standard and reliable, and the whole point of this
+project is same-source consistency across pairs, not needing
+independently-transacted rates for each.
+
+**Why not the alternative:** Could have sought a different source that
+directly quotes GBP/USD and USD/JPY (e.g. a market-data provider) for
+"purer" data — rejected, since it would break the same-source,
+same-methodology consistency this cross-pair comparison depends on, and
+the accuracy cost of triangulation via two independently-published ECB
+reference rates is negligible (rounding-level, as shown by the near-exact
+match above).
+
+**Concept tie-in:** Understanding a data source's actual construction
+method (not just its coverage/history depth) before trusting it -
+particularly relevant for third-currency pairs sourced from a
+single-base-currency-only publisher like the ECB.
+
+---
+
+## 22. Cross-pair data quality: GBP/USD's one >5% move is the real, well-documented Brexit shock
+
+**What happened:** Reran Stage 1's data-quality checks
+(`notebooks/01_initial_exploration.py`, now parameterized by `--prefix`)
+on GBP/USD and USD/JPY. Both show the identical gap pattern to EUR/USD
+(same TARGET2 holiday calendar, as expected — all three are published by
+the same ECB schedule) and a similar count of isolated flat-close days
+(42 each, vs. EUR/USD's 55 — not exceeded, not surprising). GBP/USD,
+unlike EUR/USD and USD/JPY, showed **one** single-day move beyond ±5%:
+2016-06-24, -7.84%.
+
+**Why it happened:** Checked the surrounding dates directly: GBP/USD
+closed at 1.4869 on 2016-06-23 (the UK's Brexit referendum day, polls
+still open) and crashed to 1.3704 the next day (2016-06-24, the day the
+Leave result was announced) — a genuine, extremely well-documented
+market shock, not a data artifact. (It kept falling afterward — 1.3187 by
+2016-06-27 — but that day's move was under the 5% single-day threshold,
+so wasn't separately flagged.)
+
+**What we did:** Confirmed this is real market history via the exact
+date/magnitude match to public knowledge of the Brexit shock, and left
+it in the data unmodified — this is exactly the kind of real, event-driven
+volatility a forecasting model should be evaluated against, not a data
+quality defect to fix. Noted for later: this event falls in the
+**training** split (pre-2020), not validation or test, so it cannot have
+artificially inflated any model's out-of-sample performance — it's part
+of the history models learn from, not part of what they're scored against.
+
+**Why not the alternative:** Could have flagged this as a data anomaly
+requiring investigation into the source - unnecessary once the date and
+magnitude were cross-checked against known history; treating a real,
+well-documented market event as suspicious would waste effort chasing a
+non-problem.
+
+**Concept tie-in:** Distinguishing genuine event-driven volatility (keep
+it, it's real and instructive) from a data quality defect (fix or flag
+it) — the same judgment call already exercised in Stage 1 for EUR/USD,
+now confirmed to generalize correctly to a pair with a real, sharp,
+identifiable historical shock in its history.
+
+---
+
+## 23. Cross-pair ADF check: stationarity independently reconfirmed for both new pairs
+
+**What happened:** Ran the ADF test (`notebooks/02_target_and_stationarity.py`,
+now parameterized) independently on GBP/USD and USD/JPY rather than
+assuming EUR/USD's result transfers. Both raw price series are
+non-stationary (GBP/USD p=0.454; USD/JPY p=0.811) and both log-return
+series are strongly stationary (both p<1e-6) — the same pattern as
+EUR/USD (p=0.320 / p<1e-6).
+
+**Why it happened:** All three are liquid, freely-floating major
+currency pairs with no fixed peg or band, so the same fundamental
+argument for non-stationary price / stationary return applies to all
+three — this result confirms rather than surprises, but it was checked
+independently rather than assumed, per this project's own instruction
+not to let a result "transfer" without verification.
+
+**What we did:** Proceeded to build features and models on log returns
+for both new pairs with the same confidence level as EUR/USD, backed by
+pair-specific evidence rather than an inherited assumption.
+
+**Why not the alternative:** Could have skipped rerunning the ADF test
+for the new pairs on the reasoning that "it's the same phenomenon for
+any major FX pair" — explicitly avoided per the project's own standard:
+even a highly likely-to-transfer result should be checked, not assumed,
+especially when the check is cheap (seconds) and the alternative (an
+unverified assumption baked into every downstream model) is not free if
+wrong.
+
+**Concept tie-in:** Verifying rather than assuming that a statistical
+property transfers across superficially similar datasets — cheap
+insurance against a pair-specific surprise (e.g. a pair with capital
+controls or a currency peg in its history, which would break this
+assumption; none of these three have that in this window, but the check
+is what confirms it, not foreknowledge).
+
+---
+
+## 24. GBP/USD's ARIMA order search selected (2,0,2), not (0,0,0) — investigated, doesn't survive out-of-sample
+
+**What happened:** Unlike EUR/USD and USD/JPY (both converged to
+ARIMA(0,0,0)), GBP/USD's AIC/BIC grid search selected **ARIMA(2,0,2)** —
+AIC 13.5 points better than the null (0,0,0) model, a conventionally
+decisive margin (>10). At face value this looks like GBP/USD might carry
+real linear autocorrelation structure the other two pairs don't.
+
+**Why it happened (investigation before reporting):** Ran the full
+one-step-ahead walk-forward evaluation for ARIMA(2,0,2) on GBP/USD's
+validation and test periods, the same as every other model/pair. Result:
+RMSE 0.006118 (val) / 0.004261 (test) vs. naive's 0.006109 (val) /
+0.004247 (test) — ARIMA(2,0,2) is **marginally worse than naive on both
+periods** (ratio 1.0014 val, 1.0031 test), not better. The AIC's in-sample
+preference for the more complex order did not translate into any
+out-of-sample forecasting improvement — the classic pattern of a model
+fitting in-sample noise structure (plausibly related to the Brexit shock
+and its immediate aftermath in the training window, entry #22) that
+doesn't generalize.
+
+**What we did:** Reported this as a genuine, informative finding rather
+than either (a) taking the AIC preference at face value as "GBP/USD has
+real structure EUR/USD lacks," or (b) discarding the order-search result
+because it's inconvenient. Both are true and stated plainly: GBP/USD's
+data-driven order search is not degenerate the way EUR/USD's is (it
+found something to fit), but that in-sample preference carries no
+demonstrated real-world forecasting value on held-out data - the
+walk-forward result is what actually answers the "does it beat naive"
+question, not the AIC comparison alone.
+
+Corroborating evidence from the ACF check (`notebooks/03_acf_pacf_check.py`,
+now rerun per pair): GBP/USD's training-set ACF shows **6 of 20 lags**
+exceeding the approximate 95% significance band (lags 1, 2, 3, 7, 10,
+15), versus EUR/USD's 3 and USD/JPY's **zero** — GBP/USD genuinely has
+more detectable linear autocorrelation than the other two pairs, which
+is consistent with (and helps explain) why its order search landed on a
+non-trivial model while the other two didn't. This makes the overall
+point sharper, not weaker: the in-sample signal is real and
+independently corroborated by two different diagnostics (ACF, AIC), and
+it *still* doesn't produce a usable out-of-sample forecasting edge -
+detectable autocorrelation and exploitable predictability are not the
+same claim.
+
+**Why not the alternative:** Could have stopped at the AIC grid search
+and reported "GBP/USD shows real ARIMA-detectable structure, unlike
+EUR/USD" — this is exactly the kind of face-value cross-pair difference
+this stage's instructions warned against reporting without a sanity
+check; the out-of-sample walk-forward check (already standard procedure
+for every ARIMA run in this project, not a special one-off addition)
+was sufficient to correct the record without extra work.
+
+**Concept tie-in:** In-sample AIC/BIC preference vs. out-of-sample
+predictive skill are different questions - a large, "decisive" AIC gap
+can still fail to produce any real forecasting improvement, particularly
+when a training window contains a sharp one-off event (Brexit) whose
+in-sample autocorrelation signature isn't a repeatable pattern.
+
+---
+
+## 25. USD/JPY's XGBoost search behaved differently (314 trees, not instant convergence) — checked against test, doesn't hold up
+
+**What happened:** EUR/USD's and GBP/USD's XGBoost grid searches both
+converged to `best_iteration=0` for every one of 32 hyperparameter
+configurations (instant convergence to the trivial prediction). USD/JPY's
+search did not: its best configuration used 314 deployed trees, with a
+small but real-looking validation RMSE improvement over naive (0.006096
+vs. 0.006105, ratio 0.9987 - about 0.13% better) and a materially
+different, more distributed feature-importance profile (`roll_mean_20`
+and `roll_mean_5` as top features, not `roll_std_20`/`lag_1`/`lag_5`).
+
+**Why it happened (investigation before reporting):** Per this project's
+own overfitting-guard standard (apply extra scrutiny to any
+better-than-naive validation result, and check whether it holds on test),
+computed the same model/naive RMSE ratio on test: 0.006153 vs. naive's
+0.006149 — **ratio 1.0007, i.e. very slightly WORSE than naive on test**,
+the opposite direction from validation. The small validation-set
+improvement evaporated (in fact mildly reversed) on the untouched test
+set - the textbook signature of a model finding noise-level structure
+specific to the validation window's realized values, not a generalizable
+pattern.
+
+**What we did:** Reported this plainly as checked-and-rejected, not as
+"USD/JPY shows XGBoost-detectable structure." The mechanics behind the
+314-tree search itself are still worth noting honestly: early stopping
+took longer to give up on USD/JPY than on the other two pairs, which is
+itself mildly interesting (USD/JPY's feature-target relationship is
+*slightly* less immediately degenerate to a boosting algorithm than
+EUR/USD's or GBP/USD's), but "took longer to conclude there's nothing
+here" is a different, weaker claim than "found something here," and the
+test-set check is what distinguishes the two.
+
+**Why not the alternative:** Could have reported the validation
+improvement and feature-importance shift as evidence USD/JPY carries
+exploitable nonlinear structure the other two pairs lack — this is
+exactly the "cross-pair difference reported without a sanity check"
+outcome the project's own instructions warned against; running the
+existing test-set comparison (no new code needed) settled the question
+directly.
+
+**Concept tie-in:** A validation-set improvement must survive an
+untouched test set before being treated as real - the same principle
+already established in Stage 4 (#16) for EUR/USD, now demonstrated on a
+case where the improvement initially looked more promising (many trees,
+not zero) before the test check corrected the picture.
+
+---
+
+## 26. USD/JPY's elevated directional accuracy (ARIMA/LSTM ~55-57% on test) traced to test-period trend imbalance, not skill
+
+**What happened:** USD/JPY's ARIMA and LSTM showed directional accuracy
+on test (56.9% and 56.2% respectively) noticeably above the ~49-52%
+coin-flip range every other model/pair/period had shown so far -
+initially looking like a possible real directional edge specific to this
+pair. XGBoost on the same pair/period, by contrast, showed **46.3%** -
+*below* a coin flip, in the opposite direction.
+
+**Why it happened (investigation before reporting):** Checked the actual
+class balance of USD/JPY's test period (2024-01-02 to 2026-09-10):
+**391 up-days vs. 296 down-days (56.8% positive)** - a genuine, real
+directional imbalance driven by the well-known, sustained USD/JPY
+uptrend over this window (continued BOJ/Fed policy-rate divergence).
+Checked each model's actual prediction signs over the same period:
+ARIMA predicted a **positive** return on all 688 test days (its walk-
+forward-updated constant term drifted positive, reflecting the
+train+val combined mean of +3.19e-5, itself a legacy of the same
+underlying uptrend already present before the test window began), while
+XGBoost's predictions skewed **negative** (403 negative vs. 285 positive
+days). A model that always guesses the majority class in an imbalanced
+period scores above 50% by construction, regardless of any real
+day-to-day predictive skill; a model guessing the minority class scores
+below 50% for the identical reason. This fully explains both the "high"
+ARIMA/LSTM numbers and XGBoost's "low" number as the same underlying
+mechanism pointing in different directions, not three independent
+findings.
+
+**What we did:** Reported this plainly as a **structural artifact of a
+trending test period colliding with each model's essentially-arbitrary
+constant-ish sign bias**, not evidence of real forecasting skill on
+USD/JPY specifically. The RMSE comparison (entry #25 and the main table)
+already independently confirms no model shows genuine magnitude-based
+skill on this pair - this entry explains why directional accuracy alone,
+without that RMSE cross-check, would have told a misleading story.
+
+**Why not the alternative:** Could have reported "USD/JPY shows stronger
+directional predictability than EUR/USD or GBP/USD" based on the raw
+ARIMA/LSTM numbers - this is precisely the kind of cross-pair difference
+this stage's instructions require investigating before reporting; the
+investigation here directly falsifies that reading by showing the
+"opposite" result (XGBoost's sub-50% score) is produced by the exact
+same mechanism, and by confirming via RMSE that no model actually
+predicts next-day direction better than chance once class imbalance is
+accounted for.
+
+**Concept tie-in:** Directional accuracy is not a safe metric in
+isolation on a trending series with imbalanced up/down day counts - a
+model needs no real skill to score above (or below) 50% if its
+predictions carry even a small, arbitrary constant bias in one
+direction. This is a genuinely useful, generalizable lesson about why
+this project's shared evaluation module reports RMSE/MAE as co-equal
+metrics rather than leading with directional accuracy alone.
+
+---
+
+## 27. Cross-pair conclusion: the EUR/USD null finding generalizes to all three major pairs
+
+**What happened:** Assembled the unified three-pair, four-model
+comparison (`src/cross_pair_comparison.py`,
+`data/processed/cross_pair_comparison.csv`) and computed each model's
+RMSE ratio to naive, same pair and period, throughout. Across all 3
+pairs x 3 non-naive models x 2 periods = 18 comparisons, **not one**
+shows a ratio below 0.98 (i.e. a >2% RMSE improvement over naive) or
+reflects a real, test-surviving improvement — the two cases that looked
+promising at first glance (GBP/USD's ARIMA(2,0,2) AIC preference, entry
+#24; USD/JPY's XGBoost 314-tree validation improvement, entry #25) were
+each investigated and found not to hold up out-of-sample.
+
+**Why it happened:** All three pairs examined here are highly liquid,
+freely-floating major currency pairs with deep, continuous markets -
+exactly the category of asset weak-form market efficiency theory
+predicts should be hardest to find exploitable short-horizon structure
+in, using only price-derived features (lags, rolling volatility,
+calendar effects). Three structurally different model families
+(linear/ARIMA, nonlinear-tabular/XGBoost, deep-sequential/LSTM), applied
+identically across three pairs with genuinely different macro
+histories (EUR/USD's steady multi-year cycles, GBP/USD's Brexit shock
+and subsequent decline, USD/JPY's sustained 2022-2025 uptrend), all
+converge on the same answer.
+
+**What we did:** Extended the project's "Key Finding" from an EUR/USD-
+specific result to a three-pair-confirmed one in the README, with the
+two investigated near-exceptions (entries #24, #25) documented
+explicitly as reasons *for* confidence in the overall finding (the
+process caught them and correctly ruled them out) rather than omitted as
+inconvenient.
+
+**Why not the alternative:** Could have mined for a more favorable
+framing of GBP/USD's ARIMA(2,0,2) AIC result or USD/JPY's XGBoost
+314-tree result — deliberately rejected both times per the same
+test-set-integrity discipline maintained since Stage 3; a three-pair
+null result, arrived at honestly, is a more valuable and more defensible
+project outcome than a single-pair "exception" that would not survive
+scrutiny.
+
+**Concept tie-in:** Generalization testing across genuinely different
+instances (not just re-running the same analysis on the same data) as
+the strongest available evidence for a finding's robustness - this is
+the project's third layer of convergent evidence (after cross-model
+convergence within EUR/USD in Stage 5), now cross-pair as well as
+cross-model.
+
+---
+
 ## Template for future entries (keep using this format going forward)
 
 ## N. [Short description of what happened]

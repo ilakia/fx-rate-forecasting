@@ -1,8 +1,12 @@
 """
-LSTM model for the EUR/USD log-return series — the third and final model
-family in this project (after naive and ARIMA in Stage 3, XGBoost in
-Stage 4), and the only one that sees the feature set as an actual
+LSTM model for an FX pair's log-return series — the third and final
+model family in this project (after naive and ARIMA in Stage 3, XGBoost
+in Stage 4), and the only one that sees the feature set as an actual
 temporal sequence rather than a single flattened row per prediction.
+Originally built for EUR/USD (Stage 5); parameterized in Stage 6 to
+reapply unchanged to GBP/USD and USD/JPY via --prefix — same window,
+same architecture, same training procedure per pair, per the project's
+own instruction not to re-engineer per pair without a genuine reason.
 
 Built with PyTorch, not TensorFlow/Keras — TensorFlow's pip wheel
 requires AVX instructions, and this project's venv Python is x86_64
@@ -33,6 +37,7 @@ continuous series in Stage 2 — see DECISIONS_AND_ISSUES_LOG.md for why
 LSTM's sequence framing is different).
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -63,10 +68,10 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
 
 
-def load_splits():
-    train = pd.read_csv(PROCESSED / "eurusd_train.csv", parse_dates=["date"])
-    val = pd.read_csv(PROCESSED / "eurusd_val.csv", parse_dates=["date"])
-    test = pd.read_csv(PROCESSED / "eurusd_test.csv", parse_dates=["date"])
+def load_splits(prefix: str):
+    train = pd.read_csv(PROCESSED / f"{prefix}_train.csv", parse_dates=["date"])
+    val = pd.read_csv(PROCESSED / f"{prefix}_val.csv", parse_dates=["date"])
+    test = pd.read_csv(PROCESSED / f"{prefix}_test.csv", parse_dates=["date"])
     return train, val, test
 
 
@@ -217,7 +222,12 @@ def train_model(model, X_train, y_train, X_val, y_val):
 def main():
     import torch
 
-    train, val, test = load_splits()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prefix", default="eurusd", help="e.g. eurusd, gbpusd, usdjpy")
+    args = parser.parse_args()
+    prefix = args.prefix
+
+    train, val, test = load_splits(prefix)
 
     X_train, y_train, dates_train, end_train, prev_p_train, true_p_train = build_sequences(train)
     X_val, y_val, dates_val, end_val, prev_p_val, true_p_val = build_sequences(val)
@@ -274,10 +284,10 @@ def main():
     axes[1].legend()
     axes[1].grid(alpha=0.3)
 
-    fig.suptitle(f"LSTM training curve (window={WINDOW}, hidden={HIDDEN_SIZE}, dropout={DROPOUT})")
+    fig.suptitle(f"{prefix} LSTM training curve (window={WINDOW}, hidden={HIDDEN_SIZE}, dropout={DROPOUT})")
     fig.tight_layout()
     FIGURES.mkdir(parents=True, exist_ok=True)
-    loss_fig_path = FIGURES / "lstm_loss_curve.png"
+    loss_fig_path = FIGURES / f"{prefix}_lstm_loss_curve.png"
     fig.savefig(loss_fig_path, dpi=150)
     print(f"Saved loss curve to {loss_fig_path}")
 
@@ -328,21 +338,21 @@ def main():
             "families to exploit."
         )
 
-    out_path = PROCESSED / "lstm_results.csv"
+    out_path = PROCESSED / f"{prefix}_lstm_results.csv"
     table.to_csv(out_path, index=False)
     print(f"Saved results to {out_path}")
 
-    # --- Combine into the running four-way comparison table ---
-    naive_results = pd.read_csv(PROCESSED / "naive_results.csv")
-    arima_results = pd.read_csv(PROCESSED / "arima_results.csv")
-    xgb_results = pd.read_csv(PROCESSED / "xgboost_results.csv")
+    # --- Combine into this pair's four-way comparison table ---
+    naive_results = pd.read_csv(PROCESSED / f"{prefix}_naive_results.csv")
+    arima_results = pd.read_csv(PROCESSED / f"{prefix}_arima_results.csv")
+    xgb_results = pd.read_csv(PROCESSED / f"{prefix}_xgboost_results.csv")
     combined = pd.concat([naive_results, arima_results, xgb_results, table], ignore_index=True)
-    combined_path = PROCESSED / "model_comparison_stage5.csv"
+    combined_path = PROCESSED / f"{prefix}_model_comparison.csv"
     combined.to_csv(combined_path, index=False)
     print(f"\nSaved combined naive/ARIMA/XGBoost/LSTM comparison to {combined_path}")
     print(combined.to_string(index=False))
 
-    torch.save(model.state_dict(), str(PROCESSED / "lstm_model.pt"))
+    torch.save(model.state_dict(), str(PROCESSED / f"{prefix}_lstm_model.pt"))
     meta = {
         "window": WINDOW,
         "architecture": f"LSTM(hidden={HIDDEN_SIZE}, dropout={DROPOUT}) -> Linear(1)",
@@ -356,8 +366,9 @@ def main():
         "seed": SEED,
         "framework": "pytorch (see DECISIONS_AND_ISSUES_LOG.md for why not tensorflow)",
     }
-    (PROCESSED / "lstm_training_metadata.json").write_text(json.dumps(meta, indent=2))
-    print(f"Saved training metadata to {PROCESSED / 'lstm_training_metadata.json'}")
+    meta_path = PROCESSED / f"{prefix}_lstm_training_metadata.json"
+    meta_path.write_text(json.dumps(meta, indent=2))
+    print(f"Saved training metadata to {meta_path}")
 
     return combined
 

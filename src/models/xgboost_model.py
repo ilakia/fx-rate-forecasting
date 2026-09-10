@@ -1,8 +1,11 @@
 """
-XGBoost model for the EUR/USD log-return series, using the engineered
+XGBoost model for an FX pair's log-return series, using the engineered
 feature table from src/feature_engineering.py (raw, unscaled columns —
 tree splits are scale-invariant, so the *_scaled columns built for LSTM
-aren't needed here).
+aren't needed here). Originally built for EUR/USD (Stage 4); parameterized
+in Stage 6 to reapply unchanged to GBP/USD and USD/JPY via --prefix —
+each pair gets its own independent hyperparameter grid search rather
+than reusing EUR/USD's selected configuration.
 
 Unlike ARIMA (src/models/arima_sarima.py), this model is NOT evaluated
 with a walk-forward-with-periodic-refit loop. That's a deliberate,
@@ -31,6 +34,7 @@ every configuration is also checked for a train/val performance gap
 before anything is treated as a genuine result.
 """
 
+import argparse
 import itertools
 import json
 import sys
@@ -64,10 +68,10 @@ FIXED_PARAMS = dict(
 EARLY_STOPPING_ROUNDS = 50
 
 
-def load_splits():
-    train = pd.read_csv(PROCESSED / "eurusd_train.csv", parse_dates=["date"])
-    val = pd.read_csv(PROCESSED / "eurusd_val.csv", parse_dates=["date"])
-    test = pd.read_csv(PROCESSED / "eurusd_test.csv", parse_dates=["date"])
+def load_splits(prefix: str):
+    train = pd.read_csv(PROCESSED / f"{prefix}_train.csv", parse_dates=["date"])
+    val = pd.read_csv(PROCESSED / f"{prefix}_val.csv", parse_dates=["date"])
+    test = pd.read_csv(PROCESSED / f"{prefix}_test.csv", parse_dates=["date"])
     return train, val, test
 
 
@@ -105,7 +109,12 @@ def grid_search(X_train, y_train, X_val, y_val):
 
 
 def main():
-    train, val, test = load_splits()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prefix", default="eurusd", help="e.g. eurusd, gbpusd, usdjpy")
+    args = parser.parse_args()
+    prefix = args.prefix
+
+    train, val, test = load_splits(prefix)
 
     X_train, y_train = train[FEATURE_COLUMNS], train["log_return"]
     X_val, y_val = val[FEATURE_COLUMNS], val["log_return"]
@@ -118,7 +127,7 @@ def main():
     print("\nTop 5 configurations by validation RMSE:")
     print(grid_results.head(5).to_string(index=False))
 
-    grid_path = PROCESSED / "xgboost_grid_search.csv"
+    grid_path = PROCESSED / f"{prefix}_xgboost_grid_search.csv"
     grid_results.to_csv(grid_path, index=False)
     print(f"\nSaved full grid search results to {grid_path}")
 
@@ -193,7 +202,7 @@ def main():
           f"{vol_total_gain:.2f} / {total_gain:.2f} total gain "
           f"({vol_total_gain / total_gain * 100 if total_gain else 0:.1f}%)")
 
-    imp_path = PROCESSED / "xgboost_feature_importance.csv"
+    imp_path = PROCESSED / f"{prefix}_xgboost_feature_importance.csv"
     importance_df.to_csv(imp_path, index=False)
     print(f"Saved feature importance to {imp_path}")
 
@@ -213,27 +222,18 @@ def main():
     print("\nXGBoost evaluation results:")
     print(table.to_string(index=False))
 
-    out_path = PROCESSED / "xgboost_results.csv"
+    out_path = PROCESSED / f"{prefix}_xgboost_results.csv"
     table.to_csv(out_path, index=False)
     print(f"Saved to {out_path}")
 
-    # --- Combine with prior-stage results into one running comparison table ---
-    naive_results = pd.read_csv(PROCESSED / "naive_results.csv")
-    arima_results = pd.read_csv(PROCESSED / "arima_results.csv")
-    combined = pd.concat([naive_results, arima_results, table], ignore_index=True)
-    combined_path = PROCESSED / "model_comparison_stage4.csv"
-    combined.to_csv(combined_path, index=False)
-    print(f"\nSaved combined naive/ARIMA/XGBoost comparison to {combined_path}")
-    print(combined.to_string(index=False))
-
-    best_model.save_model(str(PROCESSED / "xgboost_model.json"))
+    best_model.save_model(str(PROCESSED / f"{prefix}_xgboost_model.json"))
     params_out = {"best_hyperparameters": best_params, "fixed_params": FIXED_PARAMS,
                   "best_iteration": int(best["best_iteration"]),
                   "train_rmse": float(best["train_rmse"]),
                   "val_rmse": float(best["val_rmse"])}
-    (PROCESSED / "xgboost_selected_params.json").write_text(json.dumps(params_out, indent=2))
+    (PROCESSED / f"{prefix}_xgboost_selected_params.json").write_text(json.dumps(params_out, indent=2))
 
-    return combined
+    return table
 
 
 if __name__ == "__main__":
